@@ -77,10 +77,19 @@ func (h *Handler) OnOrders(c tele.Context) error {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(orders)))
 	for _, o := range orders {
-		itemDesc := orderItemSummary(o)
-		sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
-		sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
-		sb.WriteString(fmt.Sprintf("   时间：%s\n\n", o.CreatedAt))
+		if len(o.Children) > 0 {
+			for _, ch := range o.Children {
+				itemDesc := orderItemSummary(ch)
+				sb.WriteString(fmt.Sprintf("📦 %s\n", ch.OrderNo))
+				sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, ch.TotalAmount))
+				sb.WriteString(fmt.Sprintf("   时间：%s\n\n", ch.CreatedAt))
+			}
+		} else {
+			itemDesc := orderItemSummary(o)
+			sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
+			sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
+			sb.WriteString(fmt.Sprintf("   时间：%s\n\n", o.CreatedAt))
+		}
 	}
 	return c.Reply(sb.String())
 }
@@ -127,7 +136,17 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 		return c.Reply("没有待发货的订单")
 	}
 
-	// Aggregate by product name from order items
+	// Resolve leaf orders: parent orders with children must use children for fulfillment
+	var leafOrders []model.Order
+	for _, o := range orders {
+		if len(o.Children) > 0 {
+			leafOrders = append(leafOrders, o.Children...)
+		} else {
+			leafOrders = append(leafOrders, o)
+		}
+	}
+
+	// Aggregate by product name from leaf order items
 	type productAgg struct {
 		Name     string
 		Orders   []model.Order
@@ -135,7 +154,7 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	}
 	aggMap := make(map[string]*productAgg)
 	var productNames []string
-	for _, o := range orders {
+	for _, o := range leafOrders {
 		for _, item := range o.Items {
 			name := model.GetProductName(item.Title)
 			if name == "" {

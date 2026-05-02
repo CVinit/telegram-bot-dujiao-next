@@ -55,11 +55,11 @@ func (c *Client) StartRefreshLoop(ctx context.Context, interval time.Duration) {
 
 func (c *Client) EnsureToken(ctx context.Context) error {
 	c.mu.RLock()
-	if c.token != "" && time.Now().Before(c.expiresAt.Add(-5*time.Minute)) {
-		c.mu.RUnlock()
+	valid := c.token != "" && time.Now().Before(c.expiresAt.Add(-5*time.Minute))
+	c.mu.RUnlock()
+	if valid {
 		return nil
 	}
-	c.mu.RUnlock()
 	return c.login(ctx)
 }
 
@@ -85,138 +85,217 @@ func (c *Client) login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("login failed: status %d, body: %s", resp.StatusCode, respBody)
-	}
-
-	var loginResp model.LoginResponse
-	if err := json.NewDecoder(resp.Body).Decode(&loginResp); err != nil {
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
 		return err
 	}
 
+	// dujiao-next always returns HTTP 200; check business status_code
+	var envelope model.Response
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		return fmt.Errorf("login: parse response: %w", err)
+	}
+	if envelope.StatusCode != 0 {
+		return fmt.Errorf("login failed: %s", envelope.Msg)
+	}
+
+	var loginData model.LoginResponseData
+	if err := json.Unmarshal(envelope.Data, &loginData); err != nil {
+		return fmt.Errorf("login: parse data: %w", err)
+	}
+
+	if loginData.RequiresTOTP {
+		return fmt.Errorf("账号启用了两步验证，Bot 暂不支持")
+	}
+	if loginData.Token == "" {
+		return fmt.Errorf("login: 响应中没有 token")
+	}
+
 	c.mu.Lock()
-	c.token = loginResp.Token
-	c.expiresAt = time.Now().Add(24 * time.Hour)
+	c.token = loginData.Token
+	if loginData.ExpiresAt != nil {
+		if t, err := time.Parse(time.RFC3339, *loginData.ExpiresAt); err == nil {
+			c.expiresAt = t
+		} else {
+			c.expiresAt = time.Now().Add(24 * time.Hour)
+		}
+	} else {
+		c.expiresAt = time.Now().Add(24 * time.Hour)
+	}
 	c.mu.Unlock()
 
 	return nil
 }
 
-func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, int, error) {
+// doRequest makes an authenticated request, unwraps the response envelope,
+// and returns the "data" payload on success.
+func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) (json.RawMessage, error) {
 	if err := c.EnsureToken(ctx); err != nil {
-		return nil, 0, fmt.Errorf("auth: %w", err)
+		return nil, fmt.Errorf("auth: %w", err)
 	}
 
 	var reqBody io.Reader
 	if body != nil {
 		data, err := json.Marshal(body)
 		if err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		reqBody = bytes.NewReader(data)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 
 	c.mu.RLock()
 	token := c.token
 	c.mu.RUnlock()
+
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, resp.StatusCode, err
+		return nil, err
 	}
 
-	return respBody, resp.StatusCode, nil
+	var envelope model.Response
+	if err := json.Unmarshal(respBody, &envelope); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+	if envelope.StatusCode != 0 {
+		return nil, fmt.Errorf("API 错误 %d: %s", envelope.StatusCode, envelope.Msg)
+	}
+
+	return envelope.Data, nil
 }
 
-// Admin API methods
+// doPageRequest makes a paginated authenticated request.
+func (c *Client) doPageRequest(ctx context.Context, method, path string) (json.RawMessage, model.Pagination, error) {
+	if err := c.EnsureToken(ctx); err != nil {
+		return nil, model.Pagination{}, fmt.Errorf("auth: %w", err)
+	}
 
-func (c *Client) ListOrders(ctx context.Context, orderStatus string, page, pageSize int) (*model.OrderListResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	if err != nil {
+		return nil, model.Pagination{}, err
+	}
+
+	c.mu.RLock()
+	token := c.token
+	c.mu.RUnlock()
+
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, model.Pagination{}, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, model.Pagination{}, err
+	}
+
+	var pageResp model.PageResponse
+	if err := json.Unmarshal(respBody, &pageResp); err != nil {
+		return nil, model.Pagination{}, fmt.Errorf("parse response: %w", err)
+	}
+	if pageResp.StatusCode != 0 {
+		return nil, model.Pagination{}, fmt.Errorf("API 错误 %d: %s", pageResp.StatusCode, pageResp.Msg)
+	}
+
+	return pageResp.Data, pageResp.Pagination, nil
+}
+
+// --- Admin API Methods ---
+
+func (c *Client) ListOrders(ctx context.Context, status string, page, pageSize int) ([]model.Order, model.Pagination, error) {
 	path := fmt.Sprintf("/api/v1/admin/orders?page=%d&page_size=%d", page, pageSize)
-	if orderStatus != "" {
-		path += "&status=" + orderStatus
+	if status != "" {
+		path += "&status=" + status
 	}
-	body, code, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	data, pagination, err := c.doPageRequest(ctx, http.MethodGet, path)
+	if err != nil {
+		return nil, model.Pagination{}, err
+	}
+	var orders []model.Order
+	if err := json.Unmarshal(data, &orders); err != nil {
+		return nil, model.Pagination{}, err
+	}
+	return orders, pagination, nil
+}
+
+func (c *Client) CreateFulfillment(ctx context.Context, req model.CreateFulfillmentRequest) (*model.FulfillmentResponse, error) {
+	data, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/fulfillments", req)
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK {
-		return nil, fmt.Errorf("list orders failed: status %d, body: %s", code, body)
-	}
-	var result model.OrderListResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	var result model.FulfillmentResponse
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (c *Client) CreateFulfillment(ctx context.Context, req model.CreateFulfillmentRequest) error {
-	body, code, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/fulfillments", req)
-	if err != nil {
-		return err
-	}
-	if code != http.StatusOK && code != http.StatusCreated {
-		return fmt.Errorf("create fulfillment failed: status %d, body: %s", code, body)
-	}
-	return nil
-}
-
-func (c *Client) AddCardSecrets(ctx context.Context, req model.AddCardSecretsRequest) (*model.AddCardSecretsResponse, error) {
-	body, code, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/card-secrets", req)
+func (c *Client) CreateCardSecretBatch(ctx context.Context, req model.CreateCardSecretBatchRequest) (*model.CreateCardSecretBatchResponse, error) {
+	data, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/card-secrets/batch", req)
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK && code != http.StatusCreated {
-		return nil, fmt.Errorf("add card secrets failed: status %d, body: %s", code, body)
-	}
-	var result model.AddCardSecretsResponse
-	if err := json.Unmarshal(body, &result); err != nil {
+	var result model.CreateCardSecretBatchResponse
+	if err := json.Unmarshal(data, &result); err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func (c *Client) ListProducts(ctx context.Context, page, pageSize int) (*model.ProductListResponse, error) {
+func (c *Client) ListProducts(ctx context.Context, page, pageSize int) ([]model.Product, model.Pagination, error) {
 	path := fmt.Sprintf("/api/v1/admin/products?page=%d&page_size=%d", page, pageSize)
-	body, code, err := c.doRequest(ctx, http.MethodGet, path, nil)
+	data, pagination, err := c.doPageRequest(ctx, http.MethodGet, path)
 	if err != nil {
-		return nil, err
+		return nil, model.Pagination{}, err
 	}
-	if code != http.StatusOK {
-		return nil, fmt.Errorf("list products failed: status %d, body: %s", code, body)
+	var products []model.Product
+	if err := json.Unmarshal(data, &products); err != nil {
+		return nil, model.Pagination{}, err
 	}
-	var result model.ProductListResponse
-	if err := json.Unmarshal(body, &result); err != nil {
-		return nil, err
-	}
-	return &result, nil
+	return products, pagination, nil
 }
 
-func (c *Client) GetSalesStats(ctx context.Context, period string) (*model.SalesStats, error) {
-	path := fmt.Sprintf("/api/v1/admin/orders/stats?period=%s", period)
-	body, code, err := c.doRequest(ctx, http.MethodGet, path, nil)
+func (c *Client) GetDashboardOverview(ctx context.Context, query string) (*model.DashboardOverview, error) {
+	path := "/api/v1/admin/dashboard/overview"
+	if query != "" {
+		path += "?" + query
+	}
+	data, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
-	if code != http.StatusOK {
-		return nil, fmt.Errorf("get sales stats failed: status %d, body: %s", code, body)
-	}
-	var result model.SalesStats
-	if err := json.Unmarshal(body, &result); err != nil {
+	var overview model.DashboardOverview
+	if err := json.Unmarshal(data, &overview); err != nil {
 		return nil, err
 	}
-	return &result, nil
+	return &overview, nil
+}
+
+func (c *Client) GetInventoryAlerts(ctx context.Context) ([]model.InventoryAlert, error) {
+	data, err := c.doRequest(ctx, http.MethodGet, "/api/v1/admin/dashboard/inventory-alerts", nil)
+	if err != nil {
+		return nil, err
+	}
+	var alerts []model.InventoryAlert
+	if err := json.Unmarshal(data, &alerts); err != nil {
+		return nil, err
+	}
+	return alerts, nil
 }

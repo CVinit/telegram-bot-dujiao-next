@@ -3,6 +3,7 @@ package handler
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -63,20 +64,29 @@ func (h *Handler) OnSales(c tele.Context) error {
 // /orders
 func (h *Handler) OnOrders(c tele.Context) error {
 	ctx := context.Background()
-	resp, err := h.api.ListOrders(ctx, "fulfilling", 1, 50)
+	orders, _, err := h.api.ListOrders(ctx, "paid", 1, 50)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}
 
-	if len(resp.Items) == 0 {
+	// Filter to orders that need fulfillment (no fulfillment yet)
+	var pendingOrders []model.Order
+	for _, o := range orders {
+		if o.Status == "paid" {
+			pendingOrders = append(pendingOrders, o)
+		}
+	}
+
+	if len(pendingOrders) == 0 {
 		return c.Reply("没有待处理的订单")
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(resp.Items)))
-	for _, o := range resp.Items {
+	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(pendingOrders)))
+	for _, o := range pendingOrders {
+		itemDesc := orderItemSummary(o)
 		sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
-		sb.WriteString(fmt.Sprintf("   商品：%s | 数量：%d | 金额：%s\n", o.ProductName, o.Quantity, o.Amount))
+		sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
 		sb.WriteString(fmt.Sprintf("   时间：%s\n\n", o.CreatedAt))
 	}
 	return c.Reply(sb.String())
@@ -97,7 +107,8 @@ func (h *Handler) OnCards(c tele.Context) error {
 	selector := &tele.ReplyMarkup{}
 	var rows []tele.Row
 	for _, p := range products {
-		btn := selector.Data(p.Name, "cards", fmt.Sprintf("%d", p.ID))
+		name := model.GetProductName(p.Title)
+		btn := selector.Data(name, "cards", fmt.Sprintf("%d", p.ID))
 		rows = append(rows, selector.Row(btn))
 	}
 	selector.Inline(rows...)
@@ -113,34 +124,46 @@ func (h *Handler) OnCards(c tele.Context) error {
 // /fulfill
 func (h *Handler) OnFulfill(c tele.Context) error {
 	ctx := context.Background()
-	resp, err := h.api.ListOrders(ctx, "fulfilling", 1, 100)
+	orders, _, err := h.api.ListOrders(ctx, "paid", 1, 100)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询订单失败：%v", err))
 	}
 
-	if len(resp.Items) == 0 {
+	if len(orders) == 0 {
 		return c.Reply("没有待发货的订单")
 	}
 
-	// Aggregate by product name
+	// Aggregate by product name from order items
 	type productAgg struct {
-		Name      string
-		Orders    []model.Order
-		TotalQty  int
+		Name     string
+		Orders   []model.Order
+		TotalQty int
 	}
 	aggMap := make(map[string]*productAgg)
 	var productNames []string
-	for _, o := range resp.Items {
-		name := o.ProductName
-		if name == "" {
-			name = "未知商品"
+	for _, o := range orders {
+		for _, item := range o.Items {
+			name := model.GetProductName(item.Title)
+			if name == "" {
+				name = "未知商品"
+			}
+			if _, ok := aggMap[name]; !ok {
+				aggMap[name] = &productAgg{Name: name}
+				productNames = append(productNames, name)
+			}
+			// Only add order once per product name
+			alreadyHas := false
+			for _, existing := range aggMap[name].Orders {
+				if existing.ID == o.ID {
+					alreadyHas = true
+					break
+				}
+			}
+			if !alreadyHas {
+				aggMap[name].Orders = append(aggMap[name].Orders, o)
+			}
+			aggMap[name].TotalQty += item.Quantity
 		}
-		if _, ok := aggMap[name]; !ok {
-			aggMap[name] = &productAgg{Name: name}
-			productNames = append(productNames, name)
-		}
-		aggMap[name].Orders = append(aggMap[name].Orders, o)
-		aggMap[name].TotalQty += o.Quantity
 	}
 	sort.Strings(productNames)
 
@@ -149,20 +172,16 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	for _, name := range productNames {
 		a := aggMap[name]
 		label := fmt.Sprintf("%s (%d单, %d个)", a.Name, len(a.Orders), a.TotalQty)
-		// Encode product name in callback data (limit 64 bytes)
 		data := fmt.Sprintf("fulfill|%s", a.Name)
 		btn := selector.Data(label, "fulfill", data)
 		rows = append(rows, selector.Row(btn))
 	}
 	selector.Inline(rows...)
 
-	// Store aggregated data in state
-	ordersData := make(map[string]interface{})
-	for _, name := range productNames {
-		ordersData[name] = aggMap[name].Orders
-	}
+	// Store aggregated data in state as JSON-serializable form
+	ordersJSON, _ := json.Marshal(aggMap)
 	h.state.Set(c.Chat().ID, state.StateAwaitingFulfillSecrets, map[string]interface{}{
-		"agg_orders": ordersData,
+		"agg_json": string(ordersJSON),
 	})
 
 	return c.Reply("选择要发货的商品：", selector)
@@ -183,15 +202,37 @@ func (h *Handler) OnStock(c tele.Context) error {
 	var sb strings.Builder
 	sb.WriteString("库存概况：\n\n")
 	for _, p := range products {
-		sb.WriteString(fmt.Sprintf("📦 %s\n", p.Name))
+		name := model.GetProductName(p.Title)
+		sb.WriteString(fmt.Sprintf("📦 %s\n", name))
+
+		if p.FulfillmentType == "auto" {
+			avail := p.AutoStockAvailable
+			status := "✅"
+			if avail <= h.cfg.StockAlert.Threshold {
+				status = "⚠️"
+			}
+			lowMsg := ""
+			if avail <= h.cfg.StockAlert.Threshold {
+				lowMsg = "(低库存!)"
+			}
+			sb.WriteString(fmt.Sprintf("   %s 自动发货 库存：%d %s\n", status, avail, lowMsg))
+		} else {
+			avail := p.ManualStockTotal - p.ManualStockLocked - p.ManualStockSold
+			status := "✅"
+			if avail <= h.cfg.StockAlert.Threshold {
+				status = "⚠️"
+			}
+			lowMsg := ""
+			if avail <= h.cfg.StockAlert.Threshold {
+				lowMsg = "(低库存!)"
+			}
+			sb.WriteString(fmt.Sprintf("   %s 人工发货 库存：%d %s\n", status, avail, lowMsg))
+		}
+
 		if len(p.SKUs) > 0 {
 			for _, sku := range p.SKUs {
-				status := "✅"
-				if sku.StockCount <= h.cfg.StockAlert.Threshold {
-					status = "⚠️"
-				}
-				sb.WriteString(fmt.Sprintf("   %s %s 库存：%d %s\n", status, sku.Name, sku.StockCount,
-					map[bool]string{true: "(低库存!)", false: ""}[sku.StockCount <= h.cfg.StockAlert.Threshold]))
+				skuName := model.GetProductName(sku.Name)
+				sb.WriteString(fmt.Sprintf("      SKU: %s\n", skuName))
 			}
 		}
 		sb.WriteString("\n")
@@ -209,7 +250,6 @@ func (h *Handler) OnCancel(c tele.Context) error {
 func (h *Handler) OnCallback(c tele.Context) error {
 	callback := c.Callback()
 
-	// Parse callback prefix
 	parts := strings.SplitN(callback.Data, "|", 2)
 	prefix := parts[0]
 	suffix := ""
@@ -222,6 +262,8 @@ func (h *Handler) OnCallback(c tele.Context) error {
 		return h.handleSalesCallback(c, suffix)
 	case "cards":
 		return h.handleCardsCallback(c, suffix)
+	case "cards_sku":
+		return h.handleCardsSKUCallback(c, suffix)
 	case "fulfill":
 		return h.handleFulfillCallback(c, suffix)
 	default:
@@ -231,19 +273,41 @@ func (h *Handler) OnCallback(c tele.Context) error {
 
 func (h *Handler) handleSalesCallback(c tele.Context, period string) error {
 	ctx := context.Background()
-	stats, err := h.api.GetSalesStats(ctx, period)
+
+	// Map period to dashboard range param
+	rangeParam := map[string]string{
+		"today":     "7d", // dashboard doesn't have "today"; we use 7d and show total
+		"yesterday": "7d",
+		"week":      "7d",
+		"month":     "30d",
+	}[period]
+
+	overview, err := h.api.GetDashboardOverview(ctx, "range="+rangeParam)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}
 
 	periodLabel := map[string]string{
-		"today":     "今天",
-		"yesterday": "昨天",
-		"week":      "本周",
-		"month":     "本月",
+		"today":     "近7天",
+		"yesterday": "近7天",
+		"week":      "近7天",
+		"month":     "近30天",
 	}[period]
 
-	return c.Reply(fmt.Sprintf("%s销量统计：\n订单数：%d\n总金额：%s", periodLabel, stats.OrderCount, stats.TotalAmount))
+	msg := fmt.Sprintf("%s销量统计：\n总营收：%s\n订单数：%d\n用户数：%d", periodLabel, overview.TotalRevenue, overview.TotalOrders, overview.TotalUsers)
+
+	if len(overview.TopProducts) > 0 {
+		msg += "\n\n热销商品："
+		for i, tp := range overview.TopProducts {
+			if i >= 5 {
+				break
+			}
+			name := model.GetProductName(tp.Title)
+			msg += fmt.Sprintf("\n  %d. %s - 销量:%d 营收:%s", i+1, name, tp.SoldCount, tp.Revenue)
+		}
+	}
+
+	return c.Reply(msg)
 }
 
 func (h *Handler) handleCardsCallback(c tele.Context, productIDStr string) error {
@@ -265,23 +329,26 @@ func (h *Handler) handleCardsCallback(c tele.Context, productIDStr string) error
 		return c.Reply("商品未找到")
 	}
 
+	productName := model.GetProductName(selected.Title)
+
 	h.state.Set(chatID, state.StateAwaitingCardSecrets, map[string]interface{}{
-		"product_id": selected.ID,
-		"product_name": selected.Name,
+		"product_id":   selected.ID,
+		"product_name": productName,
 	})
 
 	if len(selected.SKUs) > 0 {
 		selector := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		for _, sku := range selected.SKUs {
-			btn := selector.Data(sku.Name, "cards_sku", fmt.Sprintf("%d", sku.ID))
+			skuName := model.GetProductName(sku.Name)
+			btn := selector.Data(skuName, "cards_sku", fmt.Sprintf("%d", sku.ID))
 			rows = append(rows, selector.Row(btn))
 		}
 		selector.Inline(rows...)
-		return c.Reply(fmt.Sprintf("已选择商品：%s\n请选择 SKU：", selected.Name), selector)
+		return c.Reply(fmt.Sprintf("已选择商品：%s\n请选择 SKU：", productName), selector)
 	}
 
-	return c.Reply(fmt.Sprintf("已选择商品：%s\n请发送卡密（每行一个）或上传 txt/csv 文件：", selected.Name))
+	return c.Reply(fmt.Sprintf("已选择商品：%s\n请发送卡密（每行一个）或上传 txt/csv 文件：", productName))
 }
 
 func (h *Handler) handleCardsSKUCallback(c tele.Context, skuIDStr string) error {
@@ -302,14 +369,18 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 		return c.Reply("会话已过期，请重新 /fulfill")
 	}
 
-	aggOrders, _ := s.Data["agg_orders"].(map[string]interface{})
-	ordersRaw, ok := aggOrders[productName]
+	aggJSONStr, _ := s.Data["agg_json"].(string)
+	var aggMap map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(aggJSONStr), &aggMap); err != nil {
+		return c.Reply("数据异常，请重新 /fulfill")
+	}
+
+	ordersRaw, ok := aggMap[productName]
 	if !ok {
 		return c.Reply("商品未找到")
 	}
-
-	orders, ok := ordersRaw.([]model.Order)
-	if !ok {
+	var orders []model.Order
+	if err := json.Unmarshal(ordersRaw, &orders); err != nil {
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
 
@@ -320,12 +391,16 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 
 	totalQty := 0
 	for _, o := range orders {
-		totalQty += o.Quantity
+		for _, item := range o.Items {
+			totalQty += item.Quantity
+		}
 	}
 
+	// Re-serialize orders for next state
+	ordersBytes, _ := json.Marshal(orders)
 	h.state.Set(chatID, state.StateAwaitingFulfillSecrets, map[string]interface{}{
 		"product_name": productName,
-		"orders":       orders,
+		"orders_json":  string(ordersBytes),
 		"total_qty":    totalQty,
 	})
 
@@ -392,7 +467,21 @@ func (h *Handler) OnDocument(c tele.Context) error {
 
 func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.ConversationState) error {
 	ctx := context.Background()
-	productID, _ := s.Data["product_id"].(int)
+
+	productIDVal, _ := s.Data["product_id"]
+	var productID uint
+	switch v := productIDVal.(type) {
+	case uint:
+		productID = v
+	case int:
+		productID = uint(v)
+	case float64:
+		productID = uint(v)
+	case json.Number:
+		n, _ := v.Int64()
+		productID = uint(n)
+	}
+
 	skuIDStr, _ := s.Data["sku_id"].(string)
 	var skuID uint
 	if skuIDStr != "" {
@@ -401,27 +490,33 @@ func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.
 
 	productName, _ := s.Data["product_name"].(string)
 
-	req := model.AddCardSecretsRequest{
-		ProductID: uint(productID),
+	req := model.CreateCardSecretBatchRequest{
+		ProductID: productID,
 		SKUID:     skuID,
 		Secrets:   secrets,
 	}
 
-	result, err := h.api.AddCardSecrets(ctx, req)
+	result, err := h.api.CreateCardSecretBatch(ctx, req)
 	if err != nil {
 		h.state.Clear(c.Chat().ID)
 		return c.Reply(fmt.Sprintf("补充卡密失败：%v", err))
 	}
 
 	h.state.Clear(c.Chat().ID)
-	return c.Reply(fmt.Sprintf("✅ 商品 %s 成功补充 %d 个卡密", productName, result.Count))
+	return c.Reply(fmt.Sprintf("✅ 商品 %s 成功补充 %d 个卡密", productName, result.Created))
 }
 
 func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *state.ConversationState) error {
 	ctx := context.Background()
 	productName, _ := s.Data["product_name"].(string)
-	ordersRaw, _ := s.Data["orders"].([]model.Order)
+	ordersJSON, _ := s.Data["orders_json"].(string)
 	totalQty, _ := s.Data["total_qty"].(int)
+
+	var orders []model.Order
+	if err := json.Unmarshal([]byte(ordersJSON), &orders); err != nil {
+		h.state.Clear(c.Chat().ID)
+		return c.Reply("数据异常，请重新 /fulfill")
+	}
 
 	if len(secrets) < totalQty {
 		return c.Reply(fmt.Sprintf("需要 %d 个卡密，但只收到 %d 个，请继续发送剩余卡密：", totalQty, len(secrets)))
@@ -431,12 +526,23 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	failCount := 0
 	secretIdx := 0
 
-	for _, o := range ordersRaw {
-		secretsForOrder := secrets[secretIdx : secretIdx+o.Quantity]
-		secretIdx += o.Quantity
+	for _, o := range orders {
+		// Sum quantities across items for this order
+		qty := 0
+		for _, item := range o.Items {
+			qty += item.Quantity
+		}
+		if qty == 0 {
+			continue
+		}
+		if secretIdx+qty > len(secrets) {
+			break
+		}
+		secretsForOrder := secrets[secretIdx : secretIdx+qty]
+		secretIdx += qty
 
 		payload := strings.Join(secretsForOrder, "\n")
-		err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
+		_, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
 			OrderID: o.ID,
 			Payload: payload,
 		})
@@ -451,23 +557,32 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	return c.Reply(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单\n❌ 失败：%d 个订单", productName, successCount, failCount))
 }
 
-// Helper functions
+// --- Helper functions ---
 
 func (h *Handler) loadAllProducts(ctx context.Context) ([]model.Product, error) {
 	var allProducts []model.Product
 	page := 1
 	for {
-		resp, err := h.api.ListProducts(ctx, page, 50)
+		products, pagination, err := h.api.ListProducts(ctx, page, 50)
 		if err != nil {
 			return nil, err
 		}
-		allProducts = append(allProducts, resp.Items...)
-		if len(allProducts) >= int(resp.Total) {
+		allProducts = append(allProducts, products...)
+		if len(allProducts) >= int(pagination.Total) {
 			break
 		}
 		page++
 	}
 	return allProducts, nil
+}
+
+func orderItemSummary(o model.Order) string {
+	var parts []string
+	for _, item := range o.Items {
+		name := model.GetProductName(item.Title)
+		parts = append(parts, fmt.Sprintf("%s x%d", name, item.Quantity))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func parseSecrets(text string) []string {
@@ -541,24 +656,24 @@ func (s *StockAlertChecker) Run(ctx context.Context) {
 }
 
 func (s *StockAlertChecker) check(ctx context.Context) {
-	products, err := s.api.ListProducts(ctx, 1, 100)
+	alerts, err := s.api.GetInventoryAlerts(ctx)
 	if err != nil {
 		return
 	}
 
-	var lowStock []string
-	for _, p := range products.Items {
-		for _, sku := range p.SKUs {
-			if sku.StockCount <= s.cfg.StockAlert.Threshold {
-				lowStock = append(lowStock, fmt.Sprintf("%s - %s: %d", p.Name, sku.Name, sku.StockCount))
-			}
-		}
+	if len(alerts) == 0 {
+		return
 	}
 
-	if len(lowStock) > 0 {
-		msg := "⚠️ 缺货提醒：\n\n" + strings.Join(lowStock, "\n")
-		for _, uid := range s.cfg.Telegram.AllowedUsers {
-			s.bot.Send(uid, msg)
-		}
+	var msgs []string
+	for _, a := range alerts {
+		pName := model.GetProductName(a.ProductTitle)
+		sName := model.GetProductName(a.SKUName)
+		msgs = append(msgs, fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock))
+	}
+
+	msg := "⚠️ 缺货提醒：\n\n" + strings.Join(msgs, "\n")
+	for _, uid := range s.cfg.Telegram.AllowedUsers {
+		s.bot.Send(uid, msg)
 	}
 }

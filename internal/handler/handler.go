@@ -190,8 +190,12 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	}
 	selector.Inline(rows...)
 
-	// Store aggregated data in state as JSON-serializable form
-	ordersJSON, _ := json.Marshal(aggMap)
+	// Store orders per product name (not full productAgg) for callback deserialization
+	ordersPerProduct := make(map[string][]model.Order)
+	for name, a := range aggMap {
+		ordersPerProduct[name] = a.Orders
+	}
+	ordersJSON, _ := json.Marshal(ordersPerProduct)
 	h.state.Set(c.Chat().ID, state.StateAwaitingFulfillSecrets, map[string]interface{}{
 		"agg_json": string(ordersJSON),
 	})

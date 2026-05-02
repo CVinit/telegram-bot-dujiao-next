@@ -1,0 +1,14 @@
+telegram:
+  bot_token: ""             # 或通过环境变量 BOT_TOKEN 覆盖
+  allowed_users:            # Telegram User ID 白名单
+    - 123456789
+
+dujiao:
+  base_url: "http://localhost:8080"
+  admin_username: ""        # 或通过环境变量 DUJIAO_USERNAME 覆盖
+  admin_password: ""        # 或通过环境变量 DUJIAO_PASSWORD 覆盖
+  jwt_refresh_interval: 30m
+
+stock_alert:
+  check_interval: 5m
+  threshold: 10

@@ -1,0 +1,27 @@
+# Binaries
+/bot
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Trellis
+.trellis/
+
+# Trellis IDE support
+.agent/
+.agents/
+.claude/
+.codex/
+.gemini/
+.kiro/
+.spec-workflow/

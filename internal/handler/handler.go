@@ -64,26 +64,19 @@ func (h *Handler) OnSales(c tele.Context) error {
 // /orders
 func (h *Handler) OnOrders(c tele.Context) error {
 	ctx := context.Background()
-	orders, _, err := h.api.ListOrders(ctx, "paid", 1, 50)
+	// "fulfilling" = paid + awaiting manual delivery
+	orders, _, err := h.api.ListOrders(ctx, "fulfilling", 1, 50)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}
 
-	// Filter to orders that need fulfillment (no fulfillment yet)
-	var pendingOrders []model.Order
-	for _, o := range orders {
-		if o.Status == "paid" {
-			pendingOrders = append(pendingOrders, o)
-		}
-	}
-
-	if len(pendingOrders) == 0 {
+	if len(orders) == 0 {
 		return c.Reply("没有待处理的订单")
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(pendingOrders)))
-	for _, o := range pendingOrders {
+	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(orders)))
+	for _, o := range orders {
 		itemDesc := orderItemSummary(o)
 		sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
 		sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
@@ -124,7 +117,8 @@ func (h *Handler) OnCards(c tele.Context) error {
 // /fulfill
 func (h *Handler) OnFulfill(c tele.Context) error {
 	ctx := context.Background()
-	orders, _, err := h.api.ListOrders(ctx, "paid", 1, 100)
+	// "fulfilling" = paid + awaiting manual delivery
+	orders, _, err := h.api.ListOrders(ctx, "fulfilling", 1, 100)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询订单失败：%v", err))
 	}
@@ -208,22 +202,20 @@ func (h *Handler) OnStock(c tele.Context) error {
 		if p.FulfillmentType == "auto" {
 			avail := p.AutoStockAvailable
 			status := "✅"
-			if avail <= h.cfg.StockAlert.Threshold {
-				status = "⚠️"
-			}
 			lowMsg := ""
 			if avail <= h.cfg.StockAlert.Threshold {
+				status = "⚠️"
 				lowMsg = "(低库存!)"
 			}
 			sb.WriteString(fmt.Sprintf("   %s 自动发货 库存：%d %s\n", status, avail, lowMsg))
+		} else if p.ManualStockTotal < 0 {
+			sb.WriteString("   ✅ 人工发货 库存：无限（按需发货）\n")
 		} else {
 			avail := p.ManualStockTotal - p.ManualStockLocked - p.ManualStockSold
 			status := "✅"
-			if avail <= h.cfg.StockAlert.Threshold {
-				status = "⚠️"
-			}
 			lowMsg := ""
 			if avail <= h.cfg.StockAlert.Threshold {
+				status = "⚠️"
 				lowMsg = "(低库存!)"
 			}
 			sb.WriteString(fmt.Sprintf("   %s 人工发货 库存：%d %s\n", status, avail, lowMsg))
@@ -231,8 +223,11 @@ func (h *Handler) OnStock(c tele.Context) error {
 
 		if len(p.SKUs) > 0 {
 			for _, sku := range p.SKUs {
-				skuName := model.GetProductName(sku.Name)
-				sb.WriteString(fmt.Sprintf("      SKU: %s\n", skuName))
+				skuLabel := sku.SKUCode
+				if skuLabel == "DEFAULT" {
+					skuLabel = "默认规格"
+				}
+				sb.WriteString(fmt.Sprintf("      SKU: %s\n", skuLabel))
 			}
 		}
 		sb.WriteString("\n")
@@ -249,8 +244,15 @@ func (h *Handler) OnCancel(c tele.Context) error {
 // OnCallback handles inline keyboard callbacks
 func (h *Handler) OnCallback(c tele.Context) error {
 	callback := c.Callback()
+	data := callback.Data
 
-	parts := strings.SplitN(callback.Data, "|", 2)
+	// telebot prefixes inline button data with "\f<unique>|"
+	// When no specific handler matches, OnCallback gets the raw data
+	if len(data) > 0 && data[0] == '\f' {
+		data = data[1:]
+	}
+
+	parts := strings.SplitN(data, "|", 2)
 	prefix := parts[0]
 	suffix := ""
 	if len(parts) > 1 {
@@ -294,16 +296,12 @@ func (h *Handler) handleSalesCallback(c tele.Context, period string) error {
 		"month":     "近30天",
 	}[period]
 
-	msg := fmt.Sprintf("%s销量统计：\n总营收：%s\n订单数：%d\n用户数：%d", periodLabel, overview.TotalRevenue, overview.TotalOrders, overview.TotalUsers)
+	msg := fmt.Sprintf("%s销量统计：\n总营收(GMV)：%s\n已付订单：%d\n完成订单：%d\n利润：%s (利润率 %s%%)", periodLabel, overview.KPI.GMVPaid, overview.KPI.PaidOrders, overview.KPI.CompletedOrders, overview.KPI.TotalProfit, overview.KPI.ProfitMargin)
 
-	if len(overview.TopProducts) > 0 {
-		msg += "\n\n热销商品："
-		for i, tp := range overview.TopProducts {
-			if i >= 5 {
-				break
-			}
-			name := model.GetProductName(tp.Title)
-			msg += fmt.Sprintf("\n  %d. %s - 销量:%d 营收:%s", i+1, name, tp.SoldCount, tp.Revenue)
+	if len(overview.Alerts) > 0 {
+		msg += "\n\n⚠️ 告警："
+		for _, a := range overview.Alerts {
+			msg += fmt.Sprintf("\n  %s: %d", a.Type, a.Value)
 		}
 	}
 
@@ -340,8 +338,11 @@ func (h *Handler) handleCardsCallback(c tele.Context, productIDStr string) error
 		selector := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		for _, sku := range selected.SKUs {
-			skuName := model.GetProductName(sku.Name)
-			btn := selector.Data(skuName, "cards_sku", fmt.Sprintf("%d", sku.ID))
+			skuLabel := sku.SKUCode
+			if skuLabel == "DEFAULT" {
+				skuLabel = "默认规格"
+			}
+			btn := selector.Data(skuLabel, "cards_sku", fmt.Sprintf("%d", sku.ID))
 			rows = append(rows, selector.Row(btn))
 		}
 		selector.Inline(rows...)

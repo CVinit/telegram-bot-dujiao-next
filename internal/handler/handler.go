@@ -185,8 +185,7 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	for _, name := range productNames {
 		a := aggMap[name]
 		label := fmt.Sprintf("%s (%d单, %d个)", a.Name, len(a.Orders), a.TotalQty)
-		data := fmt.Sprintf("fulfill|%s", a.Name)
-		btn := selector.Data(label, "fulfill", data)
+		btn := selector.Data(label, "fulfill", a.Name)
 		rows = append(rows, selector.Row(btn))
 	}
 	selector.Inline(rows...)

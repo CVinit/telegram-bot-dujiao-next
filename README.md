@@ -99,21 +99,68 @@ docker run -d \
   telegram-bot-dujiao-next
 ```
 
-### Docker Compose
+### Docker Compose（使用 GHCR 镜像）
+
+创建 `.env` 文件：
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`，填入敏感信息：
+
+```
+BOT_TOKEN=your-bot-token
+DUJIAO_USERNAME=admin
+DUJIAO_PASSWORD=your-password
+DUJIAO_BASE_URL=http://your-dujiao-instance:8080
+```
+
+创建 `docker-compose.yml`：
 
 ```yaml
-version: "3.8"
 services:
   bot:
-    build: .
-    environment:
-      - BOT_TOKEN=your-bot-token
-      - DUJIAO_USERNAME=admin
-      - DUJIAO_PASSWORD=your-password
+    image: ghcr.io/cvinit/telegram-bot-dujiao-next:latest
+    env_file:
+      - .env
     volumes:
       - ./config.yaml:/etc/bot/config.yaml
     restart: unless-stopped
 ```
+
+`config.yaml` 中只需配置非敏感项，敏感信息由 `.env` 覆盖：
+
+```yaml
+telegram:
+  bot_token: ""
+  allowed_users:
+    - 123456789
+
+dujiao:
+  base_url: ""
+  admin_username: ""
+  admin_password: ""
+  jwt_refresh_interval: 30m
+
+stock_alert:
+  check_interval: 5m
+  threshold: 10
+```
+
+启动：
+
+```bash
+docker compose up -d
+```
+
+查看日志：
+
+```bash
+docker compose logs -f bot
+```
+
+> GHCR 镜像支持 linux/amd64 和 linux/arm64，树莓派等 ARM 设备可直接使用。
 
 ## CI/CD
 

@@ -533,7 +533,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	ctx := context.Background()
 	productName, _ := s.Data["product_name"].(string)
 	ordersJSON, _ := s.Data["orders_json"].(string)
-	totalQty, _ := s.Data["total_qty"].(int)
+	totalQty := intFromIface(s.Data["total_qty"])
 
 	var orders []model.Order
 	if err := json.Unmarshal([]byte(ordersJSON), &orders); err != nil {
@@ -618,6 +618,21 @@ func parseSecrets(text string) []string {
 		}
 	}
 	return secrets
+}
+
+func intFromIface(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	}
+	return 0
 }
 
 func downloadAndParseFile(fileURL string) ([]string, error) {

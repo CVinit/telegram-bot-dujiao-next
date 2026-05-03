@@ -263,6 +263,13 @@ func (c *Client) CreateFulfillment(ctx context.Context, req model.CreateFulfillm
 	return &result, nil
 }
 
+func (c *Client) UpdateOrderStatus(ctx context.Context, orderID uint, status string) error {
+	_, err := c.doRequest(ctx, http.MethodPatch, fmt.Sprintf("/api/v1/admin/orders/%d", orderID), map[string]string{
+		"status": status,
+	})
+	return err
+}
+
 func (c *Client) CreateCardSecretBatch(ctx context.Context, req model.CreateCardSecretBatchRequest) (*model.CreateCardSecretBatchResponse, error) {
 	data, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/card-secrets/batch", req)
 	if err != nil {

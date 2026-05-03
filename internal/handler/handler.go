@@ -541,12 +541,14 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		return c.Reply(fmt.Sprintf("需要 %d 个卡密，但只收到 %d 个，请继续发送剩余卡密：", totalQty, len(secrets)))
 	}
 
-	successCount := 0
-	failCount := 0
+	type fulfillResult struct {
+		OrderID uint
+		Err     error
+	}
+	var results []fulfillResult
 	secretIdx := 0
 
 	for _, o := range orders {
-		// Sum quantities across items for this order
 		qty := 0
 		for _, item := range o.Items {
 			qty += item.Quantity
@@ -565,15 +567,48 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			OrderID: o.ID,
 			Payload: payload,
 		})
-		if err != nil {
-			failCount++
-		} else {
+		results = append(results, fulfillResult{OrderID: o.ID, Err: err})
+
+		// Auto-complete: delivered -> completed after successful fulfillment
+		if err == nil {
+			if compErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); compErr != nil {
+				// Completion failed (e.g. parent order can't complete until all children done)
+				// This is non-critical — order stays at "delivered" which is fine
+				_ = compErr
+			}
+		}
+	}
+
+	var sb strings.Builder
+	successCount := 0
+	skippedCount := 0
+	var failedOrders []string
+	for _, r := range results {
+		if r.Err == nil {
 			successCount++
+		} else {
+			errMsg := r.Err.Error()
+			if strings.Contains(errMsg, "已存在") || strings.Contains(errMsg, "already exist") {
+				skippedCount++
+			} else {
+				failedOrders = append(failedOrders, fmt.Sprintf("订单 %d: %s", r.OrderID, errMsg))
+			}
+		}
+	}
+
+	sb.WriteString(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单", productName, successCount))
+	if skippedCount > 0 {
+		sb.WriteString(fmt.Sprintf("\n⏭️ 已发货跳过：%d 个订单", skippedCount))
+	}
+	if len(failedOrders) > 0 {
+		sb.WriteString(fmt.Sprintf("\n❌ 失败：%d 个订单", len(failedOrders)))
+		for _, f := range failedOrders {
+			sb.WriteString(fmt.Sprintf("\n  %s", f))
 		}
 	}
 
 	h.state.Clear(c.Chat().ID)
-	return c.Reply(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单\n❌ 失败：%d 个订单", productName, successCount, failCount))
+	return c.Reply(sb.String())
 }
 
 // --- Helper functions ---

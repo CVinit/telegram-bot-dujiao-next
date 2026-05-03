@@ -492,20 +492,7 @@ func (h *Handler) OnDocument(c tele.Context) error {
 func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.ConversationState) error {
 	ctx := context.Background()
 
-	productIDVal, _ := s.Data["product_id"]
-	var productID uint
-	switch v := productIDVal.(type) {
-	case uint:
-		productID = v
-	case int:
-		productID = uint(v)
-	case float64:
-		productID = uint(v)
-	case json.Number:
-		n, _ := v.Int64()
-		productID = uint(n)
-	}
-
+	productID := uintFromIface(s.Data["product_id"])
 	skuIDStr, _ := s.Data["sku_id"].(string)
 	var skuID uint
 	if skuIDStr != "" {
@@ -632,6 +619,23 @@ func intFromIface(v interface{}) int {
 	case json.Number:
 		i, _ := n.Int64()
 		return int(i)
+	}
+	return 0
+}
+
+func uintFromIface(v interface{}) uint {
+	switch n := v.(type) {
+	case uint:
+		return n
+	case int:
+		return uint(n)
+	case int64:
+		return uint(n)
+	case float64:
+		return uint(n)
+	case json.Number:
+		i, _ := n.Int64()
+		return uint(i)
 	}
 	return 0
 }

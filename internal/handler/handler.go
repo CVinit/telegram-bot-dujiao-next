@@ -436,7 +436,7 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 		"total_qty":    totalQty,
 	})
 
-	return c.Reply(fmt.Sprintf("商品：%s\n待发货订单：%d 个\n需要卡密总数：%d 个\n\n请发送卡密（每行一个）或上传 txt/csv 文件：", productName, len(orders), totalQty))
+	return c.Reply(fmt.Sprintf("商品：%s\n待发货订单：%d 个\n需要卡密总数：%d 个\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密不足时将按订单顺序尽可能发货，剩余订单可稍后再发）", productName, len(orders), totalQty))
 }
 
 // OnText handles text messages (for card secret input)
@@ -529,7 +529,6 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	ctx := context.Background()
 	productName, _ := s.Data["product_name"].(string)
 	ordersJSON, _ := s.Data["orders_json"].(string)
-	totalQty := intFromIface(s.Data["total_qty"])
 
 	var orders []model.Order
 	if err := json.Unmarshal([]byte(ordersJSON), &orders); err != nil {
@@ -537,13 +536,14 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
 
-	if len(secrets) < totalQty {
-		return c.Reply(fmt.Sprintf("需要 %d 个卡密，但只收到 %d 个，请继续发送剩余卡密：", totalQty, len(secrets)))
-	}
-
+	// Fulfill as many complete orders as possible in FIFO order.
+	// Each order must receive ALL its required secrets — we never
+	// partially fulfill a single order (that would leave the customer
+	// short). Orders that can't be fully covered are skipped.
 	type fulfillResult struct {
 		OrderID uint
-		Err     error
+		Qty      int
+		Err      error
 	}
 	var results []fulfillResult
 	secretIdx := 0
@@ -557,6 +557,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			continue
 		}
 		if secretIdx+qty > len(secrets) {
+			// Not enough secrets for this order — stop here
 			break
 		}
 		secretsForOrder := secrets[secretIdx : secretIdx+qty]
@@ -567,13 +568,10 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			OrderID: o.ID,
 			Payload: payload,
 		})
-		results = append(results, fulfillResult{OrderID: o.ID, Err: err})
+		results = append(results, fulfillResult{OrderID: o.ID, Qty: qty, Err: err})
 
-		// Auto-complete: delivered -> completed after successful fulfillment
 		if err == nil {
 			if compErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); compErr != nil {
-				// Completion failed (e.g. parent order can't complete until all children done)
-				// This is non-critical — order stays at "delivered" which is fine
 				_ = compErr
 			}
 		}
@@ -582,10 +580,13 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	var sb strings.Builder
 	successCount := 0
 	skippedCount := 0
+	usedSecrets := 0
 	var failedOrders []string
+
 	for _, r := range results {
 		if r.Err == nil {
 			successCount++
+			usedSecrets += r.Qty
 		} else {
 			errMsg := r.Err.Error()
 			if strings.Contains(errMsg, "已存在") || strings.Contains(errMsg, "already exist") {
@@ -596,7 +597,10 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		}
 	}
 
-	sb.WriteString(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单", productName, successCount))
+	unusedSecrets := len(secrets) - usedSecrets
+	pendingOrders := len(orders) - successCount - skippedCount - len(failedOrders)
+
+	sb.WriteString(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单（用了 %d 个卡密）", productName, successCount, usedSecrets))
 	if skippedCount > 0 {
 		sb.WriteString(fmt.Sprintf("\n⏭️ 已发货跳过：%d 个订单", skippedCount))
 	}
@@ -605,6 +609,12 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		for _, f := range failedOrders {
 			sb.WriteString(fmt.Sprintf("\n  %s", f))
 		}
+	}
+	if unusedSecrets > 0 {
+		sb.WriteString(fmt.Sprintf("\n⚠️ 多余卡密：%d 个（未使用）", unusedSecrets))
+	}
+	if pendingOrders > 0 {
+		sb.WriteString(fmt.Sprintf("\n📋 待发货：%d 个订单仍需卡密，可重新 /fulfill", pendingOrders))
 	}
 
 	h.state.Clear(c.Chat().ID)

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -269,8 +268,6 @@ func (h *Handler) OnCallback(c tele.Context) error {
 	callback := c.Callback()
 	data := callback.Data
 
-	log.Printf("[callback] raw data=%q", data)
-
 	// telebot prefixes inline button data with "\f<unique>|"
 	// When no specific handler matches, OnCallback gets the raw data
 	if len(data) > 0 && data[0] == '\f' {
@@ -283,8 +280,6 @@ func (h *Handler) OnCallback(c tele.Context) error {
 	if len(parts) > 1 {
 		suffix = parts[1]
 	}
-
-	log.Printf("[callback] prefix=%q suffix=%q", prefix, suffix)
 
 	switch prefix {
 	case "sales":
@@ -397,27 +392,19 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 		return c.Reply("会话已过期，请重新 /fulfill")
 	}
 
-	log.Printf("[fulfill-callback] chat=%d productName=%q state_keys=%v", chatID, productName, keysOfData(s.Data))
-
 	aggJSONStr, _ := s.Data["agg_json"].(string)
-	log.Printf("[fulfill-callback] agg_json_len=%d", len(aggJSONStr))
 
 	var aggMap map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(aggJSONStr), &aggMap); err != nil {
-		log.Printf("[fulfill-callback] unmarshal agg_json failed: %v", err)
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
 
-	log.Printf("[fulfill-callback] agg_map_keys=%v", keysOfRawMap(aggMap))
-
 	ordersRaw, ok := aggMap[productName]
 	if !ok {
-		log.Printf("[fulfill-callback] product %q not in agg_map", productName)
 		return c.Reply("商品未找到")
 	}
 	var orders []model.Order
 	if err := json.Unmarshal(ordersRaw, &orders); err != nil {
-		log.Printf("[fulfill-callback] unmarshal orders failed: %v", err)
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
 
@@ -449,14 +436,10 @@ func (h *Handler) OnText(c tele.Context) error {
 	chatID := c.Chat().ID
 	s, ok := h.state.Get(chatID)
 	if !ok {
-		log.Printf("[text] no state for chat %d", chatID)
 		return nil
 	}
 
-	text := c.Text()
-	secrets := parseSecrets(text)
-	log.Printf("[text] chat=%d state=%d secrets=%d text_len=%d", chatID, s.Type, len(secrets), len(text))
-
+	secrets := parseSecrets(c.Text())
 	if len(secrets) == 0 {
 		return c.Reply("未检测到有效卡密，请每行一个发送")
 	}
@@ -467,7 +450,6 @@ func (h *Handler) OnText(c tele.Context) error {
 	case state.StateAwaitingFulfillSecrets:
 		return h.processFulfillSecrets(c, secrets, s)
 	default:
-		log.Printf("[text] unknown state %d, ignoring", s.Type)
 		return nil
 	}
 }
@@ -554,17 +536,11 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	ordersJSON, _ := s.Data["orders_json"].(string)
 	totalQty := intFromIface(s.Data["total_qty"])
 
-	log.Printf("[fulfill] processFulfillSecrets: product=%s totalQty=%d secrets=%d orders_json_len=%d",
-		productName, totalQty, len(secrets), len(ordersJSON))
-
 	var orders []model.Order
 	if err := json.Unmarshal([]byte(ordersJSON), &orders); err != nil {
-		log.Printf("[fulfill] unmarshal orders_json failed: %v", err)
 		h.state.Clear(c.Chat().ID)
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
-
-	log.Printf("[fulfill] deserialized %d orders", len(orders))
 
 	if len(secrets) < totalQty {
 		return c.Reply(fmt.Sprintf("需要 %d 个卡密，但只收到 %d 个，请继续发送剩余卡密：", totalQty, len(secrets)))
@@ -580,7 +556,6 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		for _, item := range o.Items {
 			qty += item.Quantity
 		}
-		log.Printf("[fulfill] order %d: qty=%d", o.ID, qty)
 		if qty == 0 {
 			continue
 		}
@@ -591,15 +566,13 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		secretIdx += qty
 
 		payload := strings.Join(secretsForOrder, "\n")
-		result, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
+		_, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
 			OrderID: o.ID,
 			Payload: payload,
 		})
 		if err != nil {
-			log.Printf("[fulfill] CreateFulfillment order %d failed: %v", o.ID, err)
 			failCount++
 		} else {
-			log.Printf("[fulfill] CreateFulfillment order %d success: fulfillment_id=%d", o.ID, result.ID)
 			successCount++
 		}
 	}
@@ -661,22 +634,6 @@ func intFromIface(v interface{}) int {
 		return int(i)
 	}
 	return 0
-}
-
-func keysOfData(m map[string]interface{}) []string {
-	var keys []string
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
-func keysOfRawMap(m map[string]json.RawMessage) []string {
-	var keys []string
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
 }
 
 func downloadAndParseFile(fileURL string) ([]string, error) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sort"
 	"strings"
@@ -438,7 +439,8 @@ func (h *Handler) OnText(c tele.Context) error {
 		return nil
 	}
 
-	secrets := parseSecrets(c.Text())
+	text := c.Text()
+	secrets := parseSecrets(text)
 	if len(secrets) == 0 {
 		return c.Reply("未检测到有效卡密，请每行一个发送")
 	}
@@ -535,11 +537,17 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	ordersJSON, _ := s.Data["orders_json"].(string)
 	totalQty := intFromIface(s.Data["total_qty"])
 
+	log.Printf("[fulfill] processFulfillSecrets: product=%s totalQty=%d secrets=%d orders_json_len=%d",
+		productName, totalQty, len(secrets), len(ordersJSON))
+
 	var orders []model.Order
 	if err := json.Unmarshal([]byte(ordersJSON), &orders); err != nil {
+		log.Printf("[fulfill] unmarshal orders_json failed: %v", err)
 		h.state.Clear(c.Chat().ID)
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
+
+	log.Printf("[fulfill] deserialized %d orders", len(orders))
 
 	if len(secrets) < totalQty {
 		return c.Reply(fmt.Sprintf("需要 %d 个卡密，但只收到 %d 个，请继续发送剩余卡密：", totalQty, len(secrets)))
@@ -555,6 +563,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		for _, item := range o.Items {
 			qty += item.Quantity
 		}
+		log.Printf("[fulfill] order %d: qty=%d", o.ID, qty)
 		if qty == 0 {
 			continue
 		}
@@ -565,13 +574,15 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 		secretIdx += qty
 
 		payload := strings.Join(secretsForOrder, "\n")
-		_, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
+		result, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
 			OrderID: o.ID,
 			Payload: payload,
 		})
 		if err != nil {
+			log.Printf("[fulfill] CreateFulfillment order %d failed: %v", o.ID, err)
 			failCount++
 		} else {
+			log.Printf("[fulfill] CreateFulfillment order %d success: fulfillment_id=%d", o.ID, result.ID)
 			successCount++
 		}
 	}

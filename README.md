@@ -11,6 +11,7 @@ Go 语言编写的 Telegram Bot，对接 [dujiao-next](https://github.com/dujiao
 | `/orders` | 查看待处理订单 |
 | `/cards` | 补充卡密（支持文本和文件上传） |
 | `/fulfill` | 批量发货（按商品聚合，FIFO 自动分配卡密） |
+| `/pfulfill` | 按母订单发货（严格数量校验，整单发或取消） |
 | `/stock` | 查看库存概况 |
 | `/cancel` | 取消当前操作 |
 
@@ -20,6 +21,13 @@ Go 语言编写的 Telegram Bot，对接 [dujiao-next](https://github.com/dujiao
 2. 选择商品 → 显示需要多少个卡密
 3. 发送卡密（每行一个，或上传 txt/csv 文件）
 4. Bot 按 FIFO 时间顺序自动分配卡密，逐个调用 dujiao-next API 发货
+
+### 按母订单发货流程
+
+1. `/pfulfill` → Bot 列出所有含待发货子订单的母订单
+2. 选择母订单 → 显示子订单列表及所需卡密总数
+3. 发送卡密（数量必须精确匹配，否则不发货）
+4. Bot 按 FIFO 顺序逐个子订单发货，完成后查询母订单状态并展示详情
 
 ### 缺货提醒
 

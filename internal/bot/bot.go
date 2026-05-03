@@ -64,6 +64,7 @@ func (b *Bot) registerHandlers() {
 	b.tele.Handle("/orders", b.handler.OnOrders)
 	b.tele.Handle("/cards", b.handler.OnCards)
 	b.tele.Handle("/fulfill", b.handler.OnFulfill)
+	b.tele.Handle("/pfulfill", b.handler.OnParentFulfill)
 	b.tele.Handle("/stock", b.handler.OnStock)
 	b.tele.Handle("/cancel", b.handler.OnCancel)
 

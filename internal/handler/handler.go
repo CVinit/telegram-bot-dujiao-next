@@ -39,7 +39,8 @@ func (h *Handler) OnStart(c tele.Context) error {
 			"/sales - 查看销量\n" +
 			"/orders - 待处理订单\n" +
 			"/cards - 补充卡密\n" +
-			"/fulfill - 批量发货\n" +
+			"/fulfill - 批量发货（按商品）\n" +
+		"/pfulfill - 按母订单发货\n" +
 			"/stock - 库存概况\n" +
 			"/cancel - 取消当前操作",
 	)
@@ -211,6 +212,53 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	return c.Reply("选择要发货的商品：", selector)
 }
 
+// /pfulfill — parent-order fulfillment mode
+func (h *Handler) OnParentFulfill(c tele.Context) error {
+	ctx := context.Background()
+	orders, err := h.api.ListFulfillingOrders(ctx)
+	if err != nil {
+		return c.Reply(fmt.Sprintf("查询订单失败：%v", err))
+	}
+
+	// Only keep parent orders (those with children)
+	var parentOrders []model.Order
+	for _, o := range orders {
+		if len(o.Children) > 0 {
+			parentOrders = append(parentOrders, o)
+		}
+	}
+	if len(parentOrders) == 0 {
+		return c.Reply("没有需要发货的母订单")
+	}
+
+	selector := &tele.ReplyMarkup{}
+	var rows []tele.Row
+	for _, o := range parentOrders {
+		needFulfill := 0
+		for _, ch := range o.Children {
+			if ch.Status == "fulfilling" || ch.Status == "paid" {
+				qty := 0
+				for _, item := range ch.Items {
+					qty += item.Quantity
+				}
+				needFulfill += qty
+			}
+		}
+		label := fmt.Sprintf("%s (%d个子订单待发, 共需%d个卡密)", o.OrderNo, countFulfillableChildren(o.Children), needFulfill)
+		btn := selector.Data(label, "pfulfill", fmt.Sprintf("%d", o.ID))
+		rows = append(rows, selector.Row(btn))
+	}
+	selector.Inline(rows...)
+
+	parentsJSON, _ := json.Marshal(parentOrders)
+	h.state.Clear(c.Chat().ID)
+	h.state.Set(c.Chat().ID, state.StateAwaitingParentFulfillSecrets, map[string]interface{}{
+		"parents_json": string(parentsJSON),
+	})
+
+	return c.Reply("选择要发货的母订单：", selector)
+}
+
 // /stock
 func (h *Handler) OnStock(c tele.Context) error {
 	ctx := context.Background()
@@ -298,6 +346,8 @@ func (h *Handler) OnCallback(c tele.Context) error {
 		return h.handleCardsSKUCallback(c, suffix)
 	case "fulfill":
 		return h.handleFulfillCallback(c, suffix)
+	case "pfulfill":
+		return h.handleParentFulfillCallback(c, suffix)
 	default:
 		return c.Respond()
 	}
@@ -439,6 +489,72 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 	return c.Reply(fmt.Sprintf("商品：%s\n待发货订单：%d 个\n需要卡密总数：%d 个\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密不足时将按订单顺序尽可能发货，剩余订单可稍后再发）", productName, len(orders), totalQty))
 }
 
+func (h *Handler) handleParentFulfillCallback(c tele.Context, orderIDStr string) error {
+	chatID := c.Chat().ID
+	s, ok := h.state.Get(chatID)
+	if !ok {
+		return c.Reply("会话已过期，请重新 /pfulfill")
+	}
+
+	parentsJSONStr, _ := s.Data["parents_json"].(string)
+	var parentOrders []model.Order
+	if err := json.Unmarshal([]byte(parentsJSONStr), &parentOrders); err != nil {
+		return c.Reply("数据异常，请重新 /pfulfill")
+	}
+
+	var selected *model.Order
+	orderIDInt, _ := fmt.Sscanf(orderIDStr, "%d", new(uint))
+	for i := range parentOrders {
+		if fmt.Sprintf("%d", parentOrders[i].ID) == orderIDStr {
+			selected = &parentOrders[i]
+			break
+		}
+	}
+	if selected == nil {
+		_ = orderIDInt
+		return c.Reply("订单未找到")
+	}
+
+	// Collect fulfillable children (fulfilling or paid)
+	var children []model.Order
+	for _, ch := range selected.Children {
+		if ch.Status == "fulfilling" || ch.Status == "paid" {
+			children = append(children, ch)
+		}
+	}
+	if len(children) == 0 {
+		return c.Reply("该母订单没有待发货的子订单")
+	}
+
+	sort.Slice(children, func(i, j int) bool {
+		return children[i].CreatedAt < children[j].CreatedAt
+	})
+
+	totalQty := 0
+	var childDescs []string
+	for _, ch := range children {
+		qty := 0
+		for _, item := range ch.Items {
+			qty += item.Quantity
+		}
+		totalQty += qty
+		childDescs = append(childDescs, fmt.Sprintf("  %s | %s | 数量：%d", ch.OrderNo, orderItemSummary(ch), qty))
+	}
+
+	childrenJSON, _ := json.Marshal(children)
+	h.state.Set(chatID, state.StateAwaitingParentFulfillSecrets, map[string]interface{}{
+		"parent_id":      selected.ID,
+		"parent_order_no": selected.OrderNo,
+		"children_json":  string(childrenJSON),
+		"total_qty":      totalQty,
+	})
+
+	msg := fmt.Sprintf("母订单：%s\n待发货子订单：%d 个\n需要卡密总数：%d 个\n\n子订单列表：\n%s\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密数量必须等于 %d，否则不发货）",
+		selected.OrderNo, len(children), totalQty,
+		strings.Join(childDescs, "\n"), totalQty)
+	return c.Reply(msg)
+}
+
 // OnText handles text messages (for card secret input)
 func (h *Handler) OnText(c tele.Context) error {
 	chatID := c.Chat().ID
@@ -457,6 +573,8 @@ func (h *Handler) OnText(c tele.Context) error {
 		return h.processCardSecrets(c, secrets, s)
 	case state.StateAwaitingFulfillSecrets:
 		return h.processFulfillSecrets(c, secrets, s)
+	case state.StateAwaitingParentFulfillSecrets:
+		return h.processParentFulfillSecrets(c, secrets, s)
 	default:
 		return nil
 	}
@@ -492,6 +610,8 @@ func (h *Handler) OnDocument(c tele.Context) error {
 		return h.processCardSecrets(c, secrets, s)
 	case state.StateAwaitingFulfillSecrets:
 		return h.processFulfillSecrets(c, secrets, s)
+	case state.StateAwaitingParentFulfillSecrets:
+		return h.processParentFulfillSecrets(c, secrets, s)
 	default:
 		return nil
 	}
@@ -642,7 +762,125 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	return c.Reply(sb.String())
 }
 
+func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, s *state.ConversationState) error {
+	ctx := context.Background()
+	parentOrderNo, _ := s.Data["parent_order_no"].(string)
+	parentID := uintFromIface(s.Data["parent_id"])
+	childrenJSON, _ := s.Data["children_json"].(string)
+	totalQty := intFromIface(s.Data["total_qty"])
+
+	var children []model.Order
+	if err := json.Unmarshal([]byte(childrenJSON), &children); err != nil {
+		h.state.Clear(c.Chat().ID)
+		return c.Reply("数据异常，请重新 /pfulfill")
+	}
+
+	// Strict quantity check: must match exactly
+	if len(secrets) != totalQty {
+		h.state.Clear(c.Chat().ID)
+		return c.Reply(fmt.Sprintf("❌ 卡密数量不匹配：需要 %d 个，收到 %d 个\n发货已取消，请重新 /pfulfill", totalQty, len(secrets)))
+	}
+
+	// Fulfill each child order in order
+	type childResult struct {
+		OrderNo string
+		Qty     int
+		Err     error
+	}
+	var results []childResult
+	secretIdx := 0
+	allSuccess := true
+
+	for _, ch := range children {
+		qty := 0
+		for _, item := range ch.Items {
+			qty += item.Quantity
+		}
+		if qty == 0 {
+			continue
+		}
+
+		secretsForOrder := secrets[secretIdx : secretIdx+qty]
+		secretIdx += qty
+		payload := strings.Join(secretsForOrder, "\n")
+
+		_, err := h.api.CreateFulfillment(ctx, model.CreateFulfillmentRequest{
+			OrderID: ch.ID,
+			Payload: payload,
+		})
+		results = append(results, childResult{OrderNo: ch.OrderNo, Qty: qty, Err: err})
+
+		if err == nil {
+			if compErr := h.api.UpdateOrderStatus(ctx, ch.ID, "completed"); compErr != nil {
+				_ = compErr
+			}
+		} else {
+			allSuccess = false
+		}
+	}
+
+	// Build result table
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📦 母订单发货结果：%s\n\n", parentOrderNo))
+
+	if allSuccess {
+		sb.WriteString("✅ 全部子订单发货成功\n\n")
+	} else {
+		sb.WriteString("⚠️ 部分子订单发货失败\n\n")
+	}
+
+	for i, r := range results {
+		if r.Err == nil {
+			// Query latest status
+			childStatus := "?"
+			if o, err := h.api.GetOrder(ctx, children[i].ID); err == nil {
+				childStatus = o.Status
+			}
+			sb.WriteString(fmt.Sprintf("✅ %s | %d个卡密 → %s\n", r.OrderNo, r.Qty, childStatus))
+		} else {
+			sb.WriteString(fmt.Sprintf("❌ %s | %d个卡密 → 错误：%s\n", r.OrderNo, r.Qty, r.Err.Error()))
+		}
+	}
+
+	// Query parent order status after fulfillment
+	if allSuccess {
+		if parent, err := h.api.GetOrder(ctx, parentID); err == nil {
+			sb.WriteString(fmt.Sprintf("\n📋 母订单状态：%s", parent.Status))
+			sb.WriteString(buildParentOrderDetail(parent))
+		} else {
+			sb.WriteString(fmt.Sprintf("\n📋 查询母订单状态失败：%v", err))
+		}
+	}
+
+	h.state.Clear(c.Chat().ID)
+	return c.Reply(sb.String())
+}
+
 // --- Helper functions ---
+
+func countFulfillableChildren(children []model.Order) int {
+	n := 0
+	for _, ch := range children {
+		if ch.Status == "fulfilling" || ch.Status == "paid" {
+			n++
+		}
+	}
+	return n
+}
+
+func buildParentOrderDetail(parent *model.Order) string {
+	if parent == nil || len(parent.Children) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("\n\n📊 母订单详情：%s", parent.OrderNo))
+	sb.WriteString(fmt.Sprintf("\n金额：%s | 子订单数：%d", parent.TotalAmount, len(parent.Children)))
+	for _, ch := range parent.Children {
+		itemDesc := orderItemSummary(ch)
+		sb.WriteString(fmt.Sprintf("\n  %s | %s | %s", ch.OrderNo, itemDesc, ch.Status))
+	}
+	return sb.String()
+}
 
 func (h *Handler) loadAllProducts(ctx context.Context) ([]model.Product, error) {
 	var allProducts []model.Product

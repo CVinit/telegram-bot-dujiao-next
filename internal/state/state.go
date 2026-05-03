@@ -11,6 +11,7 @@ const (
 	StateIdle StateType = iota
 	StateAwaitingCardSecrets
 	StateAwaitingFulfillSecrets
+	StateAwaitingParentFulfillSecrets
 )
 
 type ConversationState struct {

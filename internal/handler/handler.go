@@ -522,7 +522,18 @@ func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.
 	}
 
 	h.state.Clear(c.Chat().ID)
-	return c.Reply(fmt.Sprintf("✅ 商品 %s 成功补充 %d 个卡密", productName, result.Created))
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("✅ 商品 %s 补充卡密成功\n", productName))
+	sb.WriteString(fmt.Sprintf("   卡密数量：%d 个\n", result.Created))
+	if result.BatchNo != "" {
+		sb.WriteString(fmt.Sprintf("   批次号：%s\n", result.BatchNo))
+	}
+	if skuID != 0 {
+		sb.WriteString(fmt.Sprintf("   SKU ID：%d\n", skuID))
+	}
+
+	return c.Reply(sb.String())
 }
 
 func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *state.ConversationState) error {
@@ -541,7 +552,8 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	// partially fulfill a single order (that would leave the customer
 	// short). Orders that can't be fully covered are skipped.
 	type fulfillResult struct {
-		OrderID uint
+		OrderID  uint
+		OrderNo  string
 		Qty      int
 		Err      error
 	}
@@ -557,7 +569,6 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			continue
 		}
 		if secretIdx+qty > len(secrets) {
-			// Not enough secrets for this order — stop here
 			break
 		}
 		secretsForOrder := secrets[secretIdx : secretIdx+qty]
@@ -568,7 +579,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			OrderID: o.ID,
 			Payload: payload,
 		})
-		results = append(results, fulfillResult{OrderID: o.ID, Qty: qty, Err: err})
+		results = append(results, fulfillResult{OrderID: o.ID, OrderNo: o.OrderNo, Qty: qty, Err: err})
 
 		if err == nil {
 			if compErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); compErr != nil {
@@ -582,11 +593,18 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	skippedCount := 0
 	usedSecrets := 0
 	var failedOrders []string
+	var successDetails []string
 
 	for _, r := range results {
 		if r.Err == nil {
 			successCount++
 			usedSecrets += r.Qty
+			// Query order status for detail
+			orderStatus := "?"
+			if o, err := h.api.GetOrder(ctx, r.OrderID); err == nil {
+				orderStatus = o.Status
+			}
+			successDetails = append(successDetails, fmt.Sprintf("  %s → %s（%d个卡密）", r.OrderNo, orderStatus, r.Qty))
 		} else {
 			errMsg := r.Err.Error()
 			if strings.Contains(errMsg, "已存在") || strings.Contains(errMsg, "already exist") {
@@ -601,6 +619,9 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	pendingOrders := len(orders) - successCount - skippedCount - len(failedOrders)
 
 	sb.WriteString(fmt.Sprintf("📦 发货完成：%s\n✅ 成功：%d 个订单（用了 %d 个卡密）", productName, successCount, usedSecrets))
+	for _, d := range successDetails {
+		sb.WriteString("\n" + d)
+	}
 	if skippedCount > 0 {
 		sb.WriteString(fmt.Sprintf("\n⏭️ 已发货跳过：%d 个订单", skippedCount))
 	}

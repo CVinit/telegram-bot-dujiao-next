@@ -270,6 +270,18 @@ func (c *Client) UpdateOrderStatus(ctx context.Context, orderID uint, status str
 	return err
 }
 
+func (c *Client) GetOrder(ctx context.Context, orderID uint) (*model.Order, error) {
+	data, err := c.doRequest(ctx, http.MethodGet, fmt.Sprintf("/api/v1/admin/orders/%d", orderID), nil)
+	if err != nil {
+		return nil, err
+	}
+	var order model.Order
+	if err := json.Unmarshal(data, &order); err != nil {
+		return nil, err
+	}
+	return &order, nil
+}
+
 func (c *Client) CreateCardSecretBatch(ctx context.Context, req model.CreateCardSecretBatchRequest) (*model.CreateCardSecretBatchResponse, error) {
 	data, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/card-secrets/batch", req)
 	if err != nil {

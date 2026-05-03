@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/v/telegram-bot-dujiao-next/internal/api"
 	"github.com/v/telegram-bot-dujiao-next/internal/bot"
@@ -36,7 +37,7 @@ func main() {
 		log.Fatalf("登录 dujiao-next 失败：%v", err)
 	}
 
-	stateMgr := state.NewManager(5 * 1e9) // 5 min TTL
+	stateMgr := state.NewManager(5 * time.Minute)
 
 	b, err := bot.New(cfg, apiClient, stateMgr)
 	if err != nil {

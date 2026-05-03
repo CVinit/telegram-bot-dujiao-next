@@ -235,6 +235,22 @@ func (c *Client) ListOrders(ctx context.Context, status string, page, pageSize i
 	return orders, pagination, nil
 }
 
+// ListFulfillingOrders fetches orders that need manual fulfillment.
+// It queries both "fulfilling" and "partially_delivered" statuses
+// because parent orders with some children delivered change to
+// partially_delivered while remaining children still need fulfillment.
+func (c *Client) ListFulfillingOrders(ctx context.Context) ([]model.Order, error) {
+	var allOrders []model.Order
+	for _, status := range []string{"fulfilling", "partially_delivered"} {
+		orders, _, err := c.ListOrders(ctx, status, 1, 100)
+		if err != nil {
+			return nil, fmt.Errorf("list %s orders: %w", status, err)
+		}
+		allOrders = append(allOrders, orders...)
+	}
+	return allOrders, nil
+}
+
 func (c *Client) CreateFulfillment(ctx context.Context, req model.CreateFulfillmentRequest) (*model.FulfillmentResponse, error) {
 	data, err := c.doRequest(ctx, http.MethodPost, "/api/v1/admin/fulfillments", req)
 	if err != nil {

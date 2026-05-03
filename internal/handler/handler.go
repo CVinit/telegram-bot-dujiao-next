@@ -64,8 +64,7 @@ func (h *Handler) OnSales(c tele.Context) error {
 // /orders
 func (h *Handler) OnOrders(c tele.Context) error {
 	ctx := context.Background()
-	// "fulfilling" = paid + awaiting manual delivery
-	orders, _, err := h.api.ListOrders(ctx, "fulfilling", 1, 50)
+	orders, err := h.api.ListFulfillingOrders(ctx)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}
@@ -74,22 +73,27 @@ func (h *Handler) OnOrders(c tele.Context) error {
 		return c.Reply("没有待处理的订单")
 	}
 
-	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(orders)))
+	// Resolve leaf orders for display
+	var leafOrders []model.Order
 	for _, o := range orders {
 		if len(o.Children) > 0 {
 			for _, ch := range o.Children {
-				itemDesc := orderItemSummary(ch)
-				sb.WriteString(fmt.Sprintf("📦 %s\n", ch.OrderNo))
-				sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, ch.TotalAmount))
-				sb.WriteString(fmt.Sprintf("   时间：%s\n\n", ch.CreatedAt))
+				if ch.Status == "fulfilling" || ch.Status == "paid" {
+					leafOrders = append(leafOrders, ch)
+				}
 			}
 		} else {
-			itemDesc := orderItemSummary(o)
-			sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
-			sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
-			sb.WriteString(fmt.Sprintf("   时间：%s\n\n", o.CreatedAt))
+			leafOrders = append(leafOrders, o)
 		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("待处理订单（共 %d 个）：\n\n", len(leafOrders)))
+	for _, o := range leafOrders {
+		itemDesc := orderItemSummary(o)
+		sb.WriteString(fmt.Sprintf("📦 %s\n", o.OrderNo))
+		sb.WriteString(fmt.Sprintf("   %s | 金额：%s\n", itemDesc, o.TotalAmount))
+		sb.WriteString(fmt.Sprintf("   时间：%s\n\n", o.CreatedAt))
 	}
 	return c.Reply(sb.String())
 }
@@ -126,8 +130,7 @@ func (h *Handler) OnCards(c tele.Context) error {
 // /fulfill
 func (h *Handler) OnFulfill(c tele.Context) error {
 	ctx := context.Background()
-	// "fulfilling" = paid + awaiting manual delivery
-	orders, _, err := h.api.ListOrders(ctx, "fulfilling", 1, 100)
+	orders, err := h.api.ListFulfillingOrders(ctx)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询订单失败：%v", err))
 	}
@@ -137,10 +140,15 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 	}
 
 	// Resolve leaf orders: parent orders with children must use children for fulfillment
+	// Only include children that still need fulfillment (fulfilling or paid status)
 	var leafOrders []model.Order
 	for _, o := range orders {
 		if len(o.Children) > 0 {
-			leafOrders = append(leafOrders, o.Children...)
+			for _, ch := range o.Children {
+				if ch.Status == "fulfilling" || ch.Status == "paid" {
+					leafOrders = append(leafOrders, ch)
+				}
+			}
 		} else {
 			leafOrders = append(leafOrders, o)
 		}

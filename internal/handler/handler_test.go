@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/v/telegram-bot-dujiao-next/internal/model"
 )
 
 func TestParseSecrets(t *testing.T) {
@@ -117,5 +119,85 @@ func TestCallbackDataParsing(t *testing.T) {
 					tt.rawData, prefix, suffix, tt.wantPrefix, tt.wantSuffix)
 			}
 		})
+	}
+}
+
+func TestLeafOrderResolution(t *testing.T) {
+	orders := []model.Order{
+		{
+			ID:     35,
+			Status: "partially_delivered",
+			Children: []model.Order{
+				{ID: 36, Status: "delivered"},
+				{ID: 37, Status: "fulfilling"},
+				{ID: 38, Status: "fulfilling"},
+			},
+		},
+		{
+			ID:     39,
+			Status: "partially_delivered",
+			Children: []model.Order{
+				{ID: 40, Status: "delivered"},
+				{ID: 41, Status: "fulfilling"},
+			},
+		},
+		{
+			ID:     50,
+			Status: "fulfilling",
+		},
+	}
+
+	var leafOrders []model.Order
+	for _, o := range orders {
+		if len(o.Children) > 0 {
+			for _, ch := range o.Children {
+				if ch.Status == "fulfilling" || ch.Status == "paid" {
+					leafOrders = append(leafOrders, ch)
+				}
+			}
+		} else {
+			leafOrders = append(leafOrders, o)
+		}
+	}
+
+	// Should get: 37, 38, 41, 50 (not 36 or 40 which are delivered)
+	wantIDs := []uint{37, 38, 41, 50}
+	if len(leafOrders) != len(wantIDs) {
+		t.Fatalf("got %d leaf orders, want %d", len(leafOrders), len(wantIDs))
+	}
+	for i, want := range wantIDs {
+		if leafOrders[i].ID != want {
+			t.Errorf("leafOrders[%d].ID = %d, want %d", i, leafOrders[i].ID, want)
+		}
+	}
+}
+
+func TestLeafOrderResolutionAllDelivered(t *testing.T) {
+	orders := []model.Order{
+		{
+			ID:     35,
+			Status: "partially_delivered",
+			Children: []model.Order{
+				{ID: 36, Status: "delivered"},
+				{ID: 37, Status: "delivered"},
+			},
+		},
+	}
+
+	var leafOrders []model.Order
+	for _, o := range orders {
+		if len(o.Children) > 0 {
+			for _, ch := range o.Children {
+				if ch.Status == "fulfilling" || ch.Status == "paid" {
+					leafOrders = append(leafOrders, ch)
+				}
+			}
+		} else {
+			leafOrders = append(leafOrders, o)
+		}
+	}
+
+	if len(leafOrders) != 0 {
+		t.Errorf("expected 0 leaf orders when all children delivered, got %d", len(leafOrders))
 	}
 }

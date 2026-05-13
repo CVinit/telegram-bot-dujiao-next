@@ -14,12 +14,12 @@ import (
 )
 
 type Bot struct {
-	tele   *tele.Bot
-	cfg    *config.Config
-	api    *api.Client
-	state  *state.Manager
+	tele    *tele.Bot
+	cfg     *config.Config
+	api     *api.Client
+	state   *state.Manager
 	handler *handler.Handler
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
 }
 
 func New(cfg *config.Config, apiClient *api.Client, stateMgr *state.Manager) (*Bot, error) {

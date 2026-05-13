@@ -40,7 +40,7 @@ func (h *Handler) OnStart(c tele.Context) error {
 			"/orders - 待处理订单\n" +
 			"/cards - 补充卡密\n" +
 			"/fulfill - 批量发货（按商品）\n" +
-		"/pfulfill - 按母订单发货\n" +
+			"/pfulfill - 按母订单发货\n" +
 			"/stock - 库存概况\n" +
 			"/cancel - 取消当前操作",
 	)
@@ -543,10 +543,10 @@ func (h *Handler) handleParentFulfillCallback(c tele.Context, orderIDStr string)
 
 	childrenJSON, _ := json.Marshal(children)
 	h.state.Set(chatID, state.StateAwaitingParentFulfillSecrets, map[string]interface{}{
-		"parent_id":      selected.ID,
+		"parent_id":       selected.ID,
 		"parent_order_no": selected.OrderNo,
-		"children_json":  string(childrenJSON),
-		"total_qty":      totalQty,
+		"children_json":   string(childrenJSON),
+		"total_qty":       totalQty,
 	})
 
 	msg := fmt.Sprintf("母订单：%s\n待发货子订单：%d 个\n需要卡密总数：%d 个\n\n子订单列表：\n%s\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密数量必须等于 %d，否则不发货）",
@@ -672,10 +672,10 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	// partially fulfill a single order (that would leave the customer
 	// short). Orders that can't be fully covered are skipped.
 	type fulfillResult struct {
-		OrderID  uint
-		OrderNo  string
-		Qty      int
-		Err      error
+		OrderID uint
+		OrderNo string
+		Qty     int
+		Err     error
 	}
 	var results []fulfillResult
 	secretIdx := 0

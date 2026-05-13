@@ -25,10 +25,10 @@ func (s *ConversationState) IsExpired() bool {
 }
 
 type Manager struct {
-	mu       sync.RWMutex
-	states   map[int64]*ConversationState
-	ttl      time.Duration
-	stopCh   chan struct{}
+	mu     sync.RWMutex
+	states map[int64]*ConversationState
+	ttl    time.Duration
+	stopCh chan struct{}
 }
 
 func NewManager(ttl time.Duration) *Manager {

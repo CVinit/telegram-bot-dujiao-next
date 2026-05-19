@@ -1112,3 +1112,83 @@ func (s *StockAlertChecker) check(ctx context.Context) {
 		}
 	}
 }
+
+// OrderAlertChecker monitors for new manual fulfillment orders and notifies once per order.
+type OrderAlertChecker struct {
+	api *api.Client
+	cfg *config.Config
+	bot interface {
+		Send(chatID int64, text string) error
+	}
+	mu       sync.Mutex
+	seenIDs  map[uint]struct{}
+	firstRun bool
+}
+
+func NewOrderAlertChecker(apiClient *api.Client, cfg *config.Config, bot interface {
+	Send(chatID int64, text string) error
+}) *OrderAlertChecker {
+	return &OrderAlertChecker{
+		api:      apiClient,
+		cfg:      cfg,
+		bot:      bot,
+		seenIDs:  make(map[uint]struct{}),
+		firstRun: true,
+	}
+}
+
+func (o *OrderAlertChecker) Run(ctx context.Context) {
+	ticker := time.NewTicker(o.cfg.StockAlert.CheckInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			o.check(ctx)
+		}
+	}
+}
+
+func (o *OrderAlertChecker) check(ctx context.Context) {
+	orders, _, err := o.api.ListOrders(ctx, "fulfilling", 1, 50)
+	if err != nil {
+		return
+	}
+
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	// On first run, seed seen IDs without notifying
+	if o.firstRun {
+		for _, ord := range orders {
+			o.seenIDs[ord.ID] = struct{}{}
+		}
+		o.firstRun = false
+		return
+	}
+
+	var newOrders []model.Order
+	for _, ord := range orders {
+		if _, seen := o.seenIDs[ord.ID]; !seen {
+			o.seenIDs[ord.ID] = struct{}{}
+			newOrders = append(newOrders, ord)
+		}
+	}
+
+	if len(newOrders) == 0 {
+		return
+	}
+
+	var lines []string
+	for _, ord := range newOrders {
+		itemDesc := orderItemSummary(ord)
+		lines = append(lines, fmt.Sprintf("📦 %s | %s | %s", ord.OrderNo, itemDesc, ord.TotalAmount))
+	}
+
+	msg := fmt.Sprintf("🔔 新增人工处理订单（%d 个）：\n\n%s", len(newOrders), strings.Join(lines, "\n"))
+	for _, uid := range o.cfg.Telegram.AllowedUsers {
+		o.bot.Send(uid, msg)
+	}
+}

@@ -49,6 +49,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go checker.Run(ctx)
 
+	// New order alert checker
+	orderChecker := handler.NewOrderAlertChecker(apiClient, cfg, b)
+	go orderChecker.Run(ctx)
+
 	// Graceful shutdown
 	go func() {
 		ch := make(chan os.Signal, 1)

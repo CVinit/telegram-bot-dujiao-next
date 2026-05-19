@@ -103,13 +103,20 @@ func (h *Handler) OnOrders(c tele.Context) error {
 // /cards
 func (h *Handler) OnCards(c tele.Context) error {
 	ctx := context.Background()
-	products, err := h.loadAllProducts(ctx)
+	allProducts, err := h.loadAllProducts(ctx)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询商品失败：%v", err))
 	}
 
+	var products []model.Product
+	for _, p := range allProducts {
+		if p.FulfillmentType == "auto" {
+			products = append(products, p)
+		}
+	}
+
 	if len(products) == 0 {
-		return c.Reply("没有可用的商品")
+		return c.Reply("没有自动发货的商品")
 	}
 
 	selector := &tele.ReplyMarkup{}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	tele "gopkg.in/telebot.v3"
@@ -977,24 +978,34 @@ func downloadAndParseFile(fileURL string) ([]string, error) {
 	return secrets, nil
 }
 
-// StockAlertChecker runs periodic stock checks and sends alerts
+// StockAlertChecker runs periodic stock checks and sends alerts.
+// First alert fires immediately on discovery; subsequent reminders
+// are sent only at scheduled hours (morning/noon/evening).
 type StockAlertChecker struct {
 	api *api.Client
 	cfg *config.Config
 	bot interface {
 		Send(chatID int64, text string) error
 	}
+	mu            sync.Mutex
+	alertedKeys   map[string]struct{}
+	lastRemindDay int
+	remindedSlots map[int]bool
 }
 
 func NewStockAlertChecker(apiClient *api.Client, cfg *config.Config, bot interface {
 	Send(chatID int64, text string) error
 }) *StockAlertChecker {
 	return &StockAlertChecker{
-		api: apiClient,
-		cfg: cfg,
-		bot: bot,
+		api:           apiClient,
+		cfg:           cfg,
+		bot:           bot,
+		alertedKeys:   make(map[string]struct{}),
+		remindedSlots: make(map[int]bool),
 	}
 }
+
+var stockAlertHours = []int{8, 12, 18}
 
 func (s *StockAlertChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.StockAlert.CheckInterval)
@@ -1016,19 +1027,68 @@ func (s *StockAlertChecker) check(ctx context.Context) {
 		return
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	today := now.YearDay()
+
+	// Reset daily reminder slots on new day
+	if today != s.lastRemindDay {
+		s.lastRemindDay = today
+		s.remindedSlots = make(map[int]bool)
+	}
+
+	// If no alerts, clear tracked state
 	if len(alerts) == 0 {
+		s.alertedKeys = make(map[string]struct{})
 		return
 	}
 
+	// Build current alert keys and message
+	currentKeys := make(map[string]struct{})
 	var msgs []string
 	for _, a := range alerts {
 		pName := model.GetProductName(a.ProductTitle)
 		sName := model.GetProductName(a.SKUName)
+		key := fmt.Sprintf("%d:%d", a.ProductID, a.SKUID)
+		currentKeys[key] = struct{}{}
 		msgs = append(msgs, fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock))
 	}
 
-	msg := "⚠️ 缺货提醒：\n\n" + strings.Join(msgs, "\n")
-	for _, uid := range s.cfg.Telegram.AllowedUsers {
-		s.bot.Send(uid, msg)
+	// Check for newly discovered low-stock items
+	var newItems []string
+	for _, a := range alerts {
+		key := fmt.Sprintf("%d:%d", a.ProductID, a.SKUID)
+		if _, alreadyAlerted := s.alertedKeys[key]; !alreadyAlerted {
+			pName := model.GetProductName(a.ProductTitle)
+			sName := model.GetProductName(a.SKUName)
+			newItems = append(newItems, fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock))
+		}
+	}
+
+	// Update tracked keys
+	s.alertedKeys = currentKeys
+
+	// Send immediate alert for newly discovered items
+	if len(newItems) > 0 {
+		msg := "⚠️ 新发现缺货：\n\n" + strings.Join(newItems, "\n")
+		for _, uid := range s.cfg.Telegram.AllowedUsers {
+			s.bot.Send(uid, msg)
+		}
+		return
+	}
+
+	// Scheduled reminders: send at 8:00, 12:00, 18:00
+	currentHour := now.Hour()
+	for _, h := range stockAlertHours {
+		if currentHour == h && !s.remindedSlots[h] {
+			s.remindedSlots[h] = true
+			msg := fmt.Sprintf("⚠️ 缺货提醒（%02d:00）：\n\n%s", h, strings.Join(msgs, "\n"))
+			for _, uid := range s.cfg.Telegram.AllowedUsers {
+				s.bot.Send(uid, msg)
+			}
+			return
+		}
 	}
 }

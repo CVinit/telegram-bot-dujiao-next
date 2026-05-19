@@ -1028,10 +1028,27 @@ func (s *StockAlertChecker) Run(ctx context.Context) {
 	}
 }
 
+func formatAlertLine(a model.InventoryAlert) string {
+	pName := model.GetProductName(a.ProductTitle)
+	sName := model.GetProductName(a.SKUName)
+	if sName == "未知商品" {
+		sName = "默认规格"
+	}
+	return fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock)
+}
+
 func (s *StockAlertChecker) check(ctx context.Context) {
-	alerts, err := s.api.GetInventoryAlerts(ctx)
+	allAlerts, err := s.api.GetInventoryAlerts(ctx)
 	if err != nil {
 		return
+	}
+
+	// Filter by bot's own threshold
+	var alerts []model.InventoryAlert
+	for _, a := range allAlerts {
+		if a.AvailableStock <= s.cfg.StockAlert.Threshold {
+			alerts = append(alerts, a)
+		}
 	}
 
 	s.mu.Lock()
@@ -1056,11 +1073,9 @@ func (s *StockAlertChecker) check(ctx context.Context) {
 	currentKeys := make(map[string]struct{})
 	var msgs []string
 	for _, a := range alerts {
-		pName := model.GetProductName(a.ProductTitle)
-		sName := model.GetProductName(a.SKUName)
 		key := fmt.Sprintf("%d:%d", a.ProductID, a.SKUID)
 		currentKeys[key] = struct{}{}
-		msgs = append(msgs, fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock))
+		msgs = append(msgs, formatAlertLine(a))
 	}
 
 	// Check for newly discovered low-stock items
@@ -1068,9 +1083,7 @@ func (s *StockAlertChecker) check(ctx context.Context) {
 	for _, a := range alerts {
 		key := fmt.Sprintf("%d:%d", a.ProductID, a.SKUID)
 		if _, alreadyAlerted := s.alertedKeys[key]; !alreadyAlerted {
-			pName := model.GetProductName(a.ProductTitle)
-			sName := model.GetProductName(a.SKUName)
-			newItems = append(newItems, fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock))
+			newItems = append(newItems, formatAlertLine(a))
 		}
 	}
 

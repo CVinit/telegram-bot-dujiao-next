@@ -267,42 +267,34 @@ func (h *Handler) OnParentFulfill(c tele.Context) error {
 // /stock
 func (h *Handler) OnStock(c tele.Context) error {
 	ctx := context.Background()
-	products, err := h.loadAllProducts(ctx)
+	allProducts, err := h.loadAllProducts(ctx)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询库存失败：%v", err))
 	}
 
+	var products []model.Product
+	for _, p := range allProducts {
+		if p.FulfillmentType == "auto" {
+			products = append(products, p)
+		}
+	}
+
 	if len(products) == 0 {
-		return c.Reply("没有商品数据")
+		return c.Reply("没有自动发货的商品")
 	}
 
 	var sb strings.Builder
 	sb.WriteString("库存概况：\n\n")
 	for _, p := range products {
 		name := model.GetProductName(p.Title)
-		sb.WriteString(fmt.Sprintf("📦 %s\n", name))
-
-		if p.FulfillmentType == "auto" {
-			avail := p.AutoStockAvailable
-			status := "✅"
-			lowMsg := ""
-			if avail <= h.cfg.StockAlert.Threshold {
-				status = "⚠️"
-				lowMsg = "(低库存!)"
-			}
-			sb.WriteString(fmt.Sprintf("   %s 自动发货 库存：%d %s\n", status, avail, lowMsg))
-		} else if p.ManualStockTotal < 0 {
-			sb.WriteString("   ✅ 人工发货 库存：无限（按需发货）\n")
-		} else {
-			avail := p.ManualStockTotal - p.ManualStockLocked - p.ManualStockSold
-			status := "✅"
-			lowMsg := ""
-			if avail <= h.cfg.StockAlert.Threshold {
-				status = "⚠️"
-				lowMsg = "(低库存!)"
-			}
-			sb.WriteString(fmt.Sprintf("   %s 人工发货 库存：%d %s\n", status, avail, lowMsg))
+		avail := p.AutoStockAvailable
+		status := "✅"
+		lowMsg := ""
+		if avail <= h.cfg.StockAlert.Threshold {
+			status = "⚠️"
+			lowMsg = "(低库存!)"
 		}
+		sb.WriteString(fmt.Sprintf("📦 %s\n   %s 库存：%d %s\n", name, status, avail, lowMsg))
 
 		if len(p.SKUs) > 0 {
 			for _, sku := range p.SKUs {

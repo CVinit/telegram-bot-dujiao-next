@@ -7,6 +7,7 @@ RUN CGO_ENABLED=0 go build -o /bot ./cmd/bot
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates tzdata
+ENV TZ=Asia/Shanghai
 COPY --from=builder /bot /usr/local/bin/bot
 COPY config.yaml /etc/bot/config.yaml
 

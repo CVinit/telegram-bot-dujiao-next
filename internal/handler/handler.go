@@ -53,11 +53,8 @@ func (h *Handler) OnSales(c tele.Context) error {
 	selector.Inline(
 		selector.Row(
 			selector.Data("今天", "sales", "today"),
-			selector.Data("昨天", "sales", "yesterday"),
-		),
-		selector.Row(
-			selector.Data("本周", "sales", "week"),
-			selector.Data("本月", "sales", "month"),
+			selector.Data("近7天", "sales", "week"),
+			selector.Data("近30天", "sales", "month"),
 		),
 	)
 	return c.Reply("选择时间维度：", selector)
@@ -365,17 +362,15 @@ func (h *Handler) handleSalesCallback(c tele.Context, period string) error {
 	ctx := context.Background()
 
 	rangeParam := map[string]string{
-		"today":     "today",
-		"yesterday": "yesterday",
-		"week":      "7d",
-		"month":     "30d",
+		"today": "today",
+		"week":  "7d",
+		"month": "30d",
 	}[period]
 
 	periodLabel := map[string]string{
-		"today":     "今天",
-		"yesterday": "昨天",
-		"week":      "本周",
-		"month":     "本月",
+		"today": "今天",
+		"week":  "近7天",
+		"month": "近30天",
 	}[period]
 
 	overview, err := h.api.GetDashboardOverview(ctx, "range="+rangeParam)

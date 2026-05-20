@@ -364,36 +364,21 @@ func (h *Handler) OnCallback(c tele.Context) error {
 func (h *Handler) handleSalesCallback(c tele.Context, period string) error {
 	ctx := context.Background()
 
-	now := time.Now()
-	var from, to time.Time
-	var periodLabel string
+	rangeParam := map[string]string{
+		"today":     "today",
+		"yesterday": "yesterday",
+		"week":      "7d",
+		"month":     "30d",
+	}[period]
 
-	switch period {
-	case "today":
-		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		to = now
-		periodLabel = "今天"
-	case "yesterday":
-		yesterday := now.AddDate(0, 0, -1)
-		from = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
-		to = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, now.Location())
-		periodLabel = "昨天"
-	case "week":
-		weekday := int(now.Weekday())
-		if weekday == 0 {
-			weekday = 7
-		}
-		from = time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
-		to = now
-		periodLabel = "本周"
-	default: // month
-		from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
-		to = now
-		periodLabel = "本月"
-	}
+	periodLabel := map[string]string{
+		"today":     "今天",
+		"yesterday": "昨天",
+		"week":      "本周",
+		"month":     "本月",
+	}[period]
 
-	query := fmt.Sprintf("from=%s&to=%s", from.Format("2006-01-02"), to.Format("2006-01-02"))
-	overview, err := h.api.GetDashboardOverview(ctx, query)
+	overview, err := h.api.GetDashboardOverview(ctx, "range="+rangeParam)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}

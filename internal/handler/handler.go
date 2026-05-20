@@ -364,25 +364,39 @@ func (h *Handler) OnCallback(c tele.Context) error {
 func (h *Handler) handleSalesCallback(c tele.Context, period string) error {
 	ctx := context.Background()
 
-	// Map period to dashboard range param
-	rangeParam := map[string]string{
-		"today":     "7d", // dashboard doesn't have "today"; we use 7d and show total
-		"yesterday": "7d",
-		"week":      "7d",
-		"month":     "30d",
-	}[period]
+	now := time.Now()
+	var from, to time.Time
+	var periodLabel string
 
-	overview, err := h.api.GetDashboardOverview(ctx, "range="+rangeParam)
+	switch period {
+	case "today":
+		from = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		to = now
+		periodLabel = "今天"
+	case "yesterday":
+		yesterday := now.AddDate(0, 0, -1)
+		from = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 0, 0, 0, 0, now.Location())
+		to = time.Date(yesterday.Year(), yesterday.Month(), yesterday.Day(), 23, 59, 59, 0, now.Location())
+		periodLabel = "昨天"
+	case "week":
+		weekday := int(now.Weekday())
+		if weekday == 0 {
+			weekday = 7
+		}
+		from = time.Date(now.Year(), now.Month(), now.Day()-weekday+1, 0, 0, 0, 0, now.Location())
+		to = now
+		periodLabel = "本周"
+	default: // month
+		from = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+		to = now
+		periodLabel = "本月"
+	}
+
+	query := fmt.Sprintf("from=%s&to=%s", from.Format("2006-01-02"), to.Format("2006-01-02"))
+	overview, err := h.api.GetDashboardOverview(ctx, query)
 	if err != nil {
 		return c.Reply(fmt.Sprintf("查询失败：%v", err))
 	}
-
-	periodLabel := map[string]string{
-		"today":     "近7天",
-		"yesterday": "近7天",
-		"week":      "近7天",
-		"month":     "近30天",
-	}[period]
 
 	msg := fmt.Sprintf("%s销量统计：\n总营收(GMV)：%s\n已付订单：%d\n完成订单：%d\n利润：%s (利润率 %s%%)", periodLabel, overview.KPI.GMVPaid, overview.KPI.PaidOrders, overview.KPI.CompletedOrders, overview.KPI.TotalProfit, overview.KPI.ProfitMargin)
 
@@ -917,10 +931,11 @@ func orderItemSummary(o model.Order) string {
 }
 
 func parseSecrets(text string) []string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
 	var secrets []string
-	scanner := bufio.NewScanner(strings.NewReader(text))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
 		if line != "" {
 			secrets = append(secrets, line)
 		}

@@ -201,3 +201,61 @@ func TestLeafOrderResolutionAllDelivered(t *testing.T) {
 		t.Errorf("expected 0 leaf orders when all children delivered, got %d", len(leafOrders))
 	}
 }
+
+func TestCollectNewPaidOrders(t *testing.T) {
+	paidAt := "2026-05-22T13:00:00Z"
+	orders := []model.Order{
+		{ID: 1, OrderNo: "PENDING", Status: "pending_payment"},
+		{ID: 2, OrderNo: "PAID-SEEN", Status: "paid", PaidAt: &paidAt},
+		{ID: 3, OrderNo: "AUTO-DONE", Status: "completed", PaidAt: &paidAt},
+	}
+	seen := map[uint]struct{}{2: {}}
+
+	got := collectNewPaidOrders(seen, orders)
+	if len(got) != 1 || got[0].ID != 3 {
+		t.Fatalf("collectNewPaidOrders() = %+v, want only order 3", got)
+	}
+	if _, ok := seen[3]; !ok {
+		t.Fatal("collectNewPaidOrders() did not mark new paid order as seen")
+	}
+	if _, ok := seen[1]; ok {
+		t.Fatal("collectNewPaidOrders() marked unpaid order as seen")
+	}
+}
+
+func TestSeedPaidOrderIDs(t *testing.T) {
+	paidAt := "2026-05-22T13:00:00Z"
+	emptyPaidAt := " "
+	seen := map[uint]struct{}{}
+
+	seedPaidOrderIDs(seen, []model.Order{
+		{ID: 1, Status: "paid", PaidAt: &paidAt},
+		{ID: 2, Status: "completed", PaidAt: &emptyPaidAt},
+		{ID: 3, Status: "fulfilling"},
+	})
+
+	if len(seen) != 1 {
+		t.Fatalf("seedPaidOrderIDs() marked %d orders, want 1", len(seen))
+	}
+	if _, ok := seen[1]; !ok {
+		t.Fatal("seedPaidOrderIDs() did not mark paid order")
+	}
+}
+
+func TestFormatPaidOrderAlertLine(t *testing.T) {
+	got := formatPaidOrderAlertLine(model.Order{
+		OrderNo:     "DJ-PAID-001",
+		Status:      "completed",
+		TotalAmount: "19.90",
+		Items: []model.OrderItem{{
+			Title:    map[string]interface{}{"zh-CN": "自动卡密商品"},
+			Quantity: 2,
+		}},
+	})
+
+	for _, part := range []string{"DJ-PAID-001", "自动卡密商品 x2", "19.90", "completed"} {
+		if !strings.Contains(got, part) {
+			t.Errorf("formatPaidOrderAlertLine() = %q, want %q", got, part)
+		}
+	}
+}

@@ -49,7 +49,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	go checker.Run(ctx)
 
-	// New order alert checker
+	// Successful payment alert checker
 	orderChecker := handler.NewOrderAlertChecker(apiClient, cfg, b)
 	go orderChecker.Run(ctx)
 

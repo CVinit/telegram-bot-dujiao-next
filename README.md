@@ -33,6 +33,21 @@ Go 语言编写的 Telegram Bot，对接 [dujiao-next](https://github.com/dujiao
 
 Bot 定时轮询库存，低于阈值时主动推送 Telegram 消息给管理员。
 
+### 支付成功提醒
+
+Bot 定时轮询最近更新的订单，发现新的支付成功订单后主动通知管理员。提醒不区分
+自动发货和人工处理订单；启动后的首轮轮询只建立已支付订单基线，不会把旧订单
+全部重新推送一遍。当前去重状态保存在 Bot 进程内，重启后会重新建立基线。
+
+Bot 启动时还会向 Telegram 注册命令菜单，私聊里输入 `/` 可直接选择当前支持的
+命令。
+
+### 订单补发边界
+
+dujiao-next 当前正常管理接口不能把已取消订单直接恢复为待交付状态；已交付订单
+的发货内容也不是通过修改库存卡密记录回写。源码分析见
+[`docs/DUJIAO_NEXT_ORDER_RECOVERY.md`](docs/DUJIAO_NEXT_ORDER_RECOVERY.md)。
+
 ## 技术栈
 
 - Go 1.23

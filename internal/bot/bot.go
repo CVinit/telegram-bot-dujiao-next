@@ -45,6 +45,9 @@ func New(cfg *config.Config, apiClient *api.Client, stateMgr *state.Manager) (*B
 
 	b.tele.Use(b.whitelistMiddleware)
 	b.registerHandlers()
+	if err := b.registerCommandMenu(); err != nil {
+		log.Print("设置 Telegram 命令菜单失败")
+	}
 
 	return b, nil
 }
@@ -71,6 +74,23 @@ func (b *Bot) registerHandlers() {
 	b.tele.Handle(tele.OnCallback, b.handler.OnCallback)
 	b.tele.Handle(tele.OnText, b.handler.OnText)
 	b.tele.Handle(tele.OnDocument, b.handler.OnDocument)
+}
+
+func (b *Bot) registerCommandMenu() error {
+	return b.tele.SetCommands(CommandMenu())
+}
+
+func CommandMenu() []tele.Command {
+	return []tele.Command{
+		{Text: "start", Description: "功能概览"},
+		{Text: "sales", Description: "查看销量"},
+		{Text: "orders", Description: "查看待处理订单"},
+		{Text: "cards", Description: "补充自动发货卡密"},
+		{Text: "fulfill", Description: "按商品批量发货"},
+		{Text: "pfulfill", Description: "按母订单发货"},
+		{Text: "stock", Description: "查看库存概况"},
+		{Text: "cancel", Description: "取消当前操作"},
+	}
 }
 
 func (b *Bot) Start(ctx context.Context) {

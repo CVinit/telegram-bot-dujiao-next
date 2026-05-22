@@ -1100,7 +1100,7 @@ func (s *StockAlertChecker) check(ctx context.Context) {
 	}
 }
 
-// OrderAlertChecker monitors for new manual fulfillment orders and notifies once per order.
+// OrderAlertChecker monitors successful payments and notifies once per order.
 type OrderAlertChecker struct {
 	api *api.Client
 	cfg *config.Config
@@ -1128,6 +1128,8 @@ func (o *OrderAlertChecker) Run(ctx context.Context) {
 	ticker := time.NewTicker(o.cfg.StockAlert.CheckInterval)
 	defer ticker.Stop()
 
+	o.check(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -1139,7 +1141,7 @@ func (o *OrderAlertChecker) Run(ctx context.Context) {
 }
 
 func (o *OrderAlertChecker) check(ctx context.Context) {
-	orders, _, err := o.api.ListOrders(ctx, "fulfilling", 1, 50)
+	orders, err := o.api.ListRecentOrders(ctx, 100, 3)
 	if err != nil {
 		return
 	}
@@ -1147,35 +1149,59 @@ func (o *OrderAlertChecker) check(ctx context.Context) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	// On first run, seed seen IDs without notifying
+	// On first run, seed existing paid orders without notifying.
 	if o.firstRun {
-		for _, ord := range orders {
-			o.seenIDs[ord.ID] = struct{}{}
-		}
+		seedPaidOrderIDs(o.seenIDs, orders)
 		o.firstRun = false
 		return
 	}
 
-	var newOrders []model.Order
-	for _, ord := range orders {
-		if _, seen := o.seenIDs[ord.ID]; !seen {
-			o.seenIDs[ord.ID] = struct{}{}
-			newOrders = append(newOrders, ord)
-		}
-	}
-
+	newOrders := collectNewPaidOrders(o.seenIDs, orders)
 	if len(newOrders) == 0 {
 		return
 	}
 
 	var lines []string
 	for _, ord := range newOrders {
-		itemDesc := orderItemSummary(ord)
-		lines = append(lines, fmt.Sprintf("📦 %s | %s | %s", ord.OrderNo, itemDesc, ord.TotalAmount))
+		lines = append(lines, formatPaidOrderAlertLine(ord))
 	}
 
-	msg := fmt.Sprintf("🔔 新增人工处理订单（%d 个）：\n\n%s", len(newOrders), strings.Join(lines, "\n"))
+	msg := fmt.Sprintf("💰 新增支付成功订单（%d 个）：\n\n%s", len(newOrders), strings.Join(lines, "\n"))
 	for _, uid := range o.cfg.Telegram.AllowedUsers {
 		o.bot.Send(uid, msg)
 	}
+}
+
+func seedPaidOrderIDs(seen map[uint]struct{}, orders []model.Order) {
+	for _, ord := range orders {
+		if isPaidOrder(ord) {
+			seen[ord.ID] = struct{}{}
+		}
+	}
+}
+
+func collectNewPaidOrders(seen map[uint]struct{}, orders []model.Order) []model.Order {
+	var newOrders []model.Order
+	for _, ord := range orders {
+		if !isPaidOrder(ord) {
+			continue
+		}
+		if _, ok := seen[ord.ID]; !ok {
+			newOrders = append(newOrders, ord)
+		}
+		seen[ord.ID] = struct{}{}
+	}
+	return newOrders
+}
+
+func isPaidOrder(ord model.Order) bool {
+	return ord.PaidAt != nil && strings.TrimSpace(*ord.PaidAt) != ""
+}
+
+func formatPaidOrderAlertLine(ord model.Order) string {
+	itemDesc := orderItemSummary(ord)
+	if itemDesc == "" {
+		itemDesc = "无商品明细"
+	}
+	return fmt.Sprintf("📦 %s | %s | 金额：%s | 状态：%s", ord.OrderNo, itemDesc, ord.TotalAmount, ord.Status)
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -220,10 +221,24 @@ func (c *Client) doPageRequest(ctx context.Context, method, path string) (json.R
 // --- Admin API Methods ---
 
 func (c *Client) ListOrders(ctx context.Context, status string, page, pageSize int) ([]model.Order, model.Pagination, error) {
-	path := fmt.Sprintf("/api/v1/admin/orders?page=%d&page_size=%d", page, pageSize)
+	return c.listOrders(ctx, status, page, pageSize, "", "")
+}
+
+func (c *Client) listOrders(ctx context.Context, status string, page, pageSize int, sortBy, sortOrder string) ([]model.Order, model.Pagination, error) {
+	values := url.Values{}
+	values.Set("page", fmt.Sprintf("%d", page))
+	values.Set("page_size", fmt.Sprintf("%d", pageSize))
 	if status != "" {
-		path += "&status=" + status
+		values.Set("status", status)
 	}
+	if sortBy != "" {
+		values.Set("sort_by", sortBy)
+	}
+	if sortOrder != "" {
+		values.Set("sort_order", sortOrder)
+	}
+
+	path := "/api/v1/admin/orders?" + values.Encode()
 	data, pagination, err := c.doPageRequest(ctx, http.MethodGet, path)
 	if err != nil {
 		return nil, model.Pagination{}, err
@@ -233,6 +248,34 @@ func (c *Client) ListOrders(ctx context.Context, status string, page, pageSize i
 		return nil, model.Pagination{}, err
 	}
 	return orders, pagination, nil
+}
+
+// ListRecentOrders fetches the newest admin orders by update time.
+//
+// Payment callbacks and manual payment recovery can update older pending
+// orders, so paid-order notification polling should not rely on creation order.
+func (c *Client) ListRecentOrders(ctx context.Context, pageSize, maxPages int) ([]model.Order, error) {
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	if maxPages <= 0 {
+		maxPages = 1
+	}
+
+	var allOrders []model.Order
+	for page := 1; page <= maxPages; page++ {
+		orders, pagination, err := c.listOrders(ctx, "", page, pageSize, "updated_at", "desc")
+		if err != nil {
+			return nil, err
+		}
+		allOrders = append(allOrders, orders...)
+		if len(orders) == 0 ||
+			(pagination.Total > 0 && len(allOrders) >= int(pagination.Total)) ||
+			(pagination.TotalPage > 0 && int64(page) >= pagination.TotalPage) {
+			break
+		}
+	}
+	return allOrders, nil
 }
 
 // ListFulfillingOrders fetches orders that need manual fulfillment.

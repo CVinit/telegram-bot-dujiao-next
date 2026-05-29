@@ -122,6 +122,73 @@ func TestCallbackDataParsing(t *testing.T) {
 	}
 }
 
+func TestOrderItemSummaryIncludesSKUName(t *testing.T) {
+	order := model.Order{
+		Items: []model.OrderItem{{
+			Title:    map[string]interface{}{"zh-CN": "ChatGPT Plus"},
+			Quantity: 2,
+			SKUSnapshot: map[string]interface{}{
+				"sku_code":    "PLUS-MONTH",
+				"spec_values": map[string]interface{}{"zh-CN": "月付"},
+			},
+		}},
+	}
+
+	got := orderItemSummary(order)
+	for _, part := range []string{"ChatGPT Plus / 月付", "x2"} {
+		if !strings.Contains(got, part) {
+			t.Errorf("orderItemSummary() = %q, want %q", got, part)
+		}
+	}
+}
+
+func TestBuildFulfillGroupsSeparatesSKUs(t *testing.T) {
+	orders := []model.Order{
+		{
+			ID: 1,
+			Items: []model.OrderItem{{
+				ProductID: 10,
+				SKUID:     100,
+				Title:     map[string]interface{}{"zh-CN": "ChatGPT Plus"},
+				SKUSnapshot: map[string]interface{}{
+					"sku_code":    "MONTH",
+					"spec_values": map[string]interface{}{"zh-CN": "月付"},
+				},
+				Quantity: 1,
+			}},
+		},
+		{
+			ID: 2,
+			Items: []model.OrderItem{{
+				ProductID: 10,
+				SKUID:     200,
+				Title:     map[string]interface{}{"zh-CN": "ChatGPT Plus"},
+				SKUSnapshot: map[string]interface{}{
+					"sku_code":    "YEAR",
+					"spec_values": map[string]interface{}{"zh-CN": "年付"},
+				},
+				Quantity: 3,
+			}},
+		},
+	}
+
+	groups := buildFulfillGroups(orders)
+	if len(groups) != 2 {
+		t.Fatalf("buildFulfillGroups() returned %d groups, want 2", len(groups))
+	}
+
+	got := map[string]fulfillGroup{}
+	for _, group := range groups {
+		got[group.Key] = group
+	}
+	if got["10:100"].Name != "ChatGPT Plus / 月付" || got["10:100"].TotalQty != 1 {
+		t.Errorf("monthly group = %+v", got["10:100"])
+	}
+	if got["10:200"].Name != "ChatGPT Plus / 年付" || got["10:200"].TotalQty != 3 {
+		t.Errorf("yearly group = %+v", got["10:200"])
+	}
+}
+
 func TestLeafOrderResolution(t *testing.T) {
 	orders := []model.Order{
 		{

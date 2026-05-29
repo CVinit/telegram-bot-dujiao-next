@@ -31,6 +31,90 @@ func TestGetProductName(t *testing.T) {
 	}
 }
 
+func TestGetSKUName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input interface{}
+		want  string
+	}{
+		{
+			name: "localized spec values",
+			input: map[string]interface{}{
+				"sku_code":    "MONTHLY",
+				"spec_values": map[string]interface{}{"zh-CN": "月卡", "en-US": "Monthly"},
+			},
+			want: "月卡",
+		},
+		{
+			name:  "fallback sku code",
+			input: map[string]interface{}{"sku_code": "AUTO-001"},
+			want:  "AUTO-001",
+		},
+		{
+			name:  "default sku code",
+			input: map[string]interface{}{"sku_code": "DEFAULT"},
+			want:  "默认规格",
+		},
+		{
+			name:  "plain spec string",
+			input: map[string]interface{}{"spec_values": "季度版"},
+			want:  "季度版",
+		},
+		{
+			name:  "missing snapshot",
+			input: nil,
+			want:  "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetSKUName(tt.input)
+			if got != tt.want {
+				t.Errorf("GetSKUName(%v) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGetOrderItemDisplayName(t *testing.T) {
+	item := OrderItem{
+		ProductID: 1,
+		SKUID:     2,
+		Title:     map[string]interface{}{"zh-CN": "ChatGPT Plus"},
+		SKUSnapshot: map[string]interface{}{
+			"sku_code":    "PLUS-MONTH",
+			"spec_values": map[string]interface{}{"zh-CN": "月付"},
+		},
+	}
+
+	if got, want := GetOrderItemDisplayName(item), "ChatGPT Plus / 月付"; got != want {
+		t.Errorf("GetOrderItemDisplayName() = %q, want %q", got, want)
+	}
+
+	if got, want := GetOrderItemGroupKey(item), "1:2"; got != want {
+		t.Errorf("GetOrderItemGroupKey() = %q, want %q", got, want)
+	}
+}
+
+func TestGetProductSKUDisplayName(t *testing.T) {
+	sku := SKU{
+		ID:      2,
+		SKUCode: "PLUS-MONTH",
+		SpecValues: map[string]interface{}{
+			"zh-CN": "月付",
+			"en-US": "Monthly",
+		},
+	}
+
+	if got, want := GetProductSKUName(sku), "月付"; got != want {
+		t.Errorf("GetProductSKUName() = %q, want %q", got, want)
+	}
+
+	if got, want := GetProductSKUDisplayName(map[string]interface{}{"zh-CN": "ChatGPT Plus"}, sku), "ChatGPT Plus / 月付"; got != want {
+		t.Errorf("GetProductSKUDisplayName() = %q, want %q", got, want)
+	}
+}
+
 func TestResponseUnmarshal(t *testing.T) {
 	raw := `{"status_code":0,"msg":"success","data":{"id":1,"title":"test"}}`
 	var resp Response

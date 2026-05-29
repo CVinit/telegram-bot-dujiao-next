@@ -1,6 +1,10 @@
 package model
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+)
 
 // Response envelope
 
@@ -255,20 +259,145 @@ type TrendPoint struct {
 
 // Helper to extract product display name from i18n title
 func GetProductName(title interface{}) string {
-	switch v := title.(type) {
+	if name := localizedText(title); name != "" {
+		return name
+	}
+	return "未知商品"
+}
+
+func GetSKUName(snapshot interface{}) string {
+	data := objectMap(snapshot)
+	if len(data) == 0 {
+		return ""
+	}
+	if name := localizedText(data["spec_values"]); name != "" {
+		return name
+	}
+	code := cleanText(data["sku_code"])
+	if code == "" {
+		return ""
+	}
+	if code == "DEFAULT" {
+		return "默认规格"
+	}
+	return code
+}
+
+func GetProductSKUName(sku SKU) string {
+	return GetSKUName(map[string]interface{}{
+		"sku_code":    sku.SKUCode,
+		"spec_values": sku.SpecValues,
+	})
+}
+
+func GetProductSKUDisplayName(productTitle interface{}, sku SKU) string {
+	productName := GetProductName(productTitle)
+	skuName := GetProductSKUName(sku)
+	if skuName == "" {
+		return productName
+	}
+	return productName + " / " + skuName
+}
+
+func GetOrderItemDisplayName(item OrderItem) string {
+	productName := GetProductName(item.Title)
+	skuName := GetSKUName(item.SKUSnapshot)
+	if skuName == "" {
+		return productName
+	}
+	return productName + " / " + skuName
+}
+
+func GetOrderItemGroupKey(item OrderItem) string {
+	if item.ProductID != 0 || item.SKUID != 0 {
+		return fmt.Sprintf("%d:%d", item.ProductID, item.SKUID)
+	}
+	return GetOrderItemDisplayName(item)
+}
+
+func localizedText(value interface{}) string {
+	switch v := value.(type) {
 	case string:
-		return v
+		return cleanString(v)
 	case map[string]interface{}:
 		for _, key := range []string{"zh-CN", "zh", "zh-TW", "en-US", "en"} {
-			if name, ok := v[key].(string); ok && name != "" {
+			if name := cleanText(v[key]); name != "" {
 				return name
 			}
 		}
 		for _, val := range v {
-			if name, ok := val.(string); ok && name != "" {
+			if name := cleanText(val); name != "" {
 				return name
 			}
 		}
+	case map[string]string:
+		for _, key := range []string{"zh-CN", "zh", "zh-TW", "en-US", "en"} {
+			if name := cleanString(v[key]); name != "" {
+				return name
+			}
+		}
+		for _, val := range v {
+			if name := cleanString(val); name != "" {
+				return name
+			}
+		}
+	case json.RawMessage:
+		return localizedTextFromJSON(v)
+	case []byte:
+		return localizedTextFromJSON(v)
 	}
-	return "未知商品"
+	return ""
+}
+
+func localizedTextFromJSON(raw []byte) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return cleanString(text)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err == nil {
+		return localizedText(data)
+	}
+	return ""
+}
+
+func objectMap(value interface{}) map[string]interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		return v
+	case map[string]string:
+		data := make(map[string]interface{}, len(v))
+		for key, val := range v {
+			data[key] = val
+		}
+		return data
+	case json.RawMessage:
+		return objectMapFromJSON(v)
+	case []byte:
+		return objectMapFromJSON(v)
+	}
+	return nil
+}
+
+func objectMapFromJSON(raw []byte) map[string]interface{} {
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return nil
+	}
+	return data
+}
+
+func cleanText(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	return cleanString(fmt.Sprintf("%v", value))
+}
+
+func cleanString(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "<nil>" {
+		return ""
+	}
+	return value
 }

@@ -25,6 +25,18 @@ type Handler struct {
 	cfg   *config.Config
 }
 
+type fulfillGroup struct {
+	Key      string
+	Name     string
+	Orders   []model.Order
+	TotalQty int
+}
+
+type fulfillGroupState struct {
+	Name   string        `json:"name"`
+	Orders []model.Order `json:"orders"`
+}
+
 func New(apiClient *api.Client, stateMgr *state.Manager, cfg *config.Config) *Handler {
 	return &Handler{
 		api:   apiClient,
@@ -160,56 +172,25 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 		}
 	}
 
-	// Aggregate by product name from leaf order items
-	type productAgg struct {
-		Name     string
-		Orders   []model.Order
-		TotalQty int
-	}
-	aggMap := make(map[string]*productAgg)
-	var productNames []string
-	for _, o := range leafOrders {
-		for _, item := range o.Items {
-			name := model.GetProductName(item.Title)
-			if name == "" {
-				name = "未知商品"
-			}
-			if _, ok := aggMap[name]; !ok {
-				aggMap[name] = &productAgg{Name: name}
-				productNames = append(productNames, name)
-			}
-			// Only add order once per product name
-			alreadyHas := false
-			for _, existing := range aggMap[name].Orders {
-				if existing.ID == o.ID {
-					alreadyHas = true
-					break
-				}
-			}
-			if !alreadyHas {
-				aggMap[name].Orders = append(aggMap[name].Orders, o)
-			}
-			aggMap[name].TotalQty += item.Quantity
-		}
-	}
-	sort.Strings(productNames)
+	groups := buildFulfillGroups(leafOrders)
 
 	selector := &tele.ReplyMarkup{}
 	var rows []tele.Row
-	for _, name := range productNames {
-		a := aggMap[name]
-		label := fmt.Sprintf("%s (%d单, %d个)", a.Name, len(a.Orders), a.TotalQty)
-		btn := selector.Data(label, "fulfill", a.Name)
+	for _, group := range groups {
+		label := fmt.Sprintf("%s (%d单, %d个)", group.Name, len(group.Orders), group.TotalQty)
+		btn := selector.Data(label, "fulfill", group.Key)
 		rows = append(rows, selector.Row(btn))
 	}
 	selector.Inline(rows...)
 
-	// Store orders per product name (not full productAgg) for callback deserialization
-	ordersPerProduct := make(map[string][]model.Order)
-	for name, a := range aggMap {
-		ordersPerProduct[name] = a.Orders
+	groupsByKey := make(map[string]fulfillGroupState, len(groups))
+	for _, group := range groups {
+		groupsByKey[group.Key] = fulfillGroupState{
+			Name:   group.Name,
+			Orders: group.Orders,
+		}
 	}
-	ordersJSON, _ := json.Marshal(ordersPerProduct)
+	ordersJSON, _ := json.Marshal(groupsByKey)
 	h.state.Set(c.Chat().ID, state.StateAwaitingFulfillSecrets, map[string]interface{}{
 		"agg_json": string(ordersJSON),
 	})
@@ -406,21 +387,22 @@ func (h *Handler) handleCardsCallback(c tele.Context, productIDStr string) error
 	h.state.Set(chatID, state.StateAwaitingCardSecrets, map[string]interface{}{
 		"product_id":   selected.ID,
 		"product_name": productName,
+		"skus":         selected.SKUs,
 	})
 
 	if len(selected.SKUs) > 0 {
 		selector := &tele.ReplyMarkup{}
 		var rows []tele.Row
 		for _, sku := range selected.SKUs {
-			skuLabel := sku.SKUCode
-			if skuLabel == "DEFAULT" {
-				skuLabel = "默认规格"
+			skuLabel := model.GetProductSKUName(sku)
+			if skuLabel == "" {
+				skuLabel = fmt.Sprintf("SKU %d", sku.ID)
 			}
 			btn := selector.Data(skuLabel, "cards_sku", fmt.Sprintf("%d", sku.ID))
 			rows = append(rows, selector.Row(btn))
 		}
 		selector.Inline(rows...)
-		return c.Reply(fmt.Sprintf("已选择商品：%s\n请选择 SKU：", productName), selector)
+		return c.Reply(fmt.Sprintf("已选择商品：%s\n请选择要补充卡密的 SKU：", productName), selector)
 	}
 
 	return c.Reply(fmt.Sprintf("已选择商品：%s\n请发送卡密（每行一个）或上传 txt/csv 文件：", productName))
@@ -433,11 +415,24 @@ func (h *Handler) handleCardsSKUCallback(c tele.Context, skuIDStr string) error 
 		return c.Reply("会话已过期，请重新 /cards")
 	}
 
+	skuName := ""
+	if skus, ok := s.Data["skus"].([]model.SKU); ok {
+		for _, sku := range skus {
+			if fmt.Sprintf("%d", sku.ID) == skuIDStr {
+				skuName = model.GetProductSKUName(sku)
+				break
+			}
+		}
+	}
+	if skuName == "" {
+		skuName = fmt.Sprintf("SKU %s", skuIDStr)
+	}
 	s.Data["sku_id"] = skuIDStr
-	return c.Reply("请发送卡密（每行一个）或上传 txt/csv 文件：")
+	s.Data["sku_name"] = skuName
+	return c.Reply(fmt.Sprintf("已选择 SKU：%s\n请发送卡密（每行一个）或上传 txt/csv 文件：", skuName))
 }
 
-func (h *Handler) handleFulfillCallback(c tele.Context, productName string) error {
+func (h *Handler) handleFulfillCallback(c tele.Context, groupKey string) error {
 	chatID := c.Chat().ID
 	s, ok := h.state.Get(chatID)
 	if !ok {
@@ -446,19 +441,16 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 
 	aggJSONStr, _ := s.Data["agg_json"].(string)
 
-	var aggMap map[string]json.RawMessage
+	var aggMap map[string]fulfillGroupState
 	if err := json.Unmarshal([]byte(aggJSONStr), &aggMap); err != nil {
 		return c.Reply("数据异常，请重新 /fulfill")
 	}
 
-	ordersRaw, ok := aggMap[productName]
+	group, ok := aggMap[groupKey]
 	if !ok {
 		return c.Reply("商品未找到")
 	}
-	var orders []model.Order
-	if err := json.Unmarshal(ordersRaw, &orders); err != nil {
-		return c.Reply("数据异常，请重新 /fulfill")
-	}
+	orders := group.Orders
 
 	// Sort orders by creation time (FIFO)
 	sort.Slice(orders, func(i, j int) bool {
@@ -475,12 +467,12 @@ func (h *Handler) handleFulfillCallback(c tele.Context, productName string) erro
 	// Re-serialize orders for next state
 	ordersBytes, _ := json.Marshal(orders)
 	h.state.Set(chatID, state.StateAwaitingFulfillSecrets, map[string]interface{}{
-		"product_name": productName,
+		"product_name": group.Name,
 		"orders_json":  string(ordersBytes),
 		"total_qty":    totalQty,
 	})
 
-	return c.Reply(fmt.Sprintf("商品：%s\n待发货订单：%d 个\n需要卡密总数：%d 个\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密不足时将按订单顺序尽可能发货，剩余订单可稍后再发）", productName, len(orders), totalQty))
+	return c.Reply(fmt.Sprintf("商品/SKU：%s\n待发货订单：%d 个\n需要卡密总数：%d 个\n\n请发送卡密（每行一个）或上传 txt/csv 文件：\n（卡密不足时将按订单顺序尽可能发货，剩余订单可稍后再发）", group.Name, len(orders), totalQty))
 }
 
 func (h *Handler) handleParentFulfillCallback(c tele.Context, orderIDStr string) error {
@@ -622,6 +614,11 @@ func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.
 	}
 
 	productName, _ := s.Data["product_name"].(string)
+	skuName, _ := s.Data["sku_name"].(string)
+	targetName := productName
+	if skuName != "" {
+		targetName = fmt.Sprintf("%s / %s", productName, skuName)
+	}
 
 	req := model.CreateCardSecretBatchRequest{
 		ProductID: productID,
@@ -638,12 +635,12 @@ func (h *Handler) processCardSecrets(c tele.Context, secrets []string, s *state.
 	h.state.Clear(c.Chat().ID)
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("✅ 商品 %s 补充卡密成功\n", productName))
+	sb.WriteString(fmt.Sprintf("✅ 商品/SKU %s 补充卡密成功\n", targetName))
 	sb.WriteString(fmt.Sprintf("   卡密数量：%d 个\n", result.Created))
 	if result.BatchNo != "" {
 		sb.WriteString(fmt.Sprintf("   批次号：%s\n", result.BatchNo))
 	}
-	if skuID != 0 {
+	if skuID != 0 && skuName == "" {
 		sb.WriteString(fmt.Sprintf("   SKU ID：%d\n", skuID))
 	}
 
@@ -666,10 +663,11 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	// partially fulfill a single order (that would leave the customer
 	// short). Orders that can't be fully covered are skipped.
 	type fulfillResult struct {
-		OrderID uint
-		OrderNo string
-		Qty     int
-		Err     error
+		OrderID  uint
+		OrderNo  string
+		ItemDesc string
+		Qty      int
+		Err      error
 	}
 	var results []fulfillResult
 	secretIdx := 0
@@ -693,7 +691,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			OrderID: o.ID,
 			Payload: payload,
 		})
-		results = append(results, fulfillResult{OrderID: o.ID, OrderNo: o.OrderNo, Qty: qty, Err: err})
+		results = append(results, fulfillResult{OrderID: o.ID, OrderNo: o.OrderNo, ItemDesc: orderItemSummary(o), Qty: qty, Err: err})
 
 		if err == nil {
 			if compErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); compErr != nil {
@@ -718,7 +716,7 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			if o, err := h.api.GetOrder(ctx, r.OrderID); err == nil {
 				orderStatus = o.Status
 			}
-			successDetails = append(successDetails, fmt.Sprintf("  %s → %s（%d个卡密）", r.OrderNo, orderStatus, r.Qty))
+			successDetails = append(successDetails, fmt.Sprintf("  %s | %s → %s（%d个卡密）", r.OrderNo, r.ItemDesc, orderStatus, r.Qty))
 		} else {
 			errMsg := r.Err.Error()
 			if strings.Contains(errMsg, "已存在") || strings.Contains(errMsg, "already exist") {
@@ -777,9 +775,10 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 
 	// Fulfill each child order in order
 	type childResult struct {
-		OrderNo string
-		Qty     int
-		Err     error
+		OrderNo  string
+		ItemDesc string
+		Qty      int
+		Err      error
 	}
 	var results []childResult
 	secretIdx := 0
@@ -802,7 +801,7 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 			OrderID: ch.ID,
 			Payload: payload,
 		})
-		results = append(results, childResult{OrderNo: ch.OrderNo, Qty: qty, Err: err})
+		results = append(results, childResult{OrderNo: ch.OrderNo, ItemDesc: orderItemSummary(ch), Qty: qty, Err: err})
 
 		if err == nil {
 			if compErr := h.api.UpdateOrderStatus(ctx, ch.ID, "completed"); compErr != nil {
@@ -830,9 +829,9 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 			if o, err := h.api.GetOrder(ctx, children[i].ID); err == nil {
 				childStatus = o.Status
 			}
-			sb.WriteString(fmt.Sprintf("✅ %s | %d个卡密 → %s\n", r.OrderNo, r.Qty, childStatus))
+			sb.WriteString(fmt.Sprintf("✅ %s | %s | %d个卡密 → %s\n", r.OrderNo, r.ItemDesc, r.Qty, childStatus))
 		} else {
-			sb.WriteString(fmt.Sprintf("❌ %s | %d个卡密 → 错误：%s\n", r.OrderNo, r.Qty, r.Err.Error()))
+			sb.WriteString(fmt.Sprintf("❌ %s | %s | %d个卡密 → 错误：%s\n", r.OrderNo, r.ItemDesc, r.Qty, r.Err.Error()))
 		}
 	}
 
@@ -860,6 +859,46 @@ func countFulfillableChildren(children []model.Order) int {
 		}
 	}
 	return n
+}
+
+func buildFulfillGroups(leafOrders []model.Order) []fulfillGroup {
+	aggMap := make(map[string]*fulfillGroup)
+	var keys []string
+	for _, order := range leafOrders {
+		for _, item := range order.Items {
+			key := model.GetOrderItemGroupKey(item)
+			name := model.GetOrderItemDisplayName(item)
+			if _, ok := aggMap[key]; !ok {
+				aggMap[key] = &fulfillGroup{Key: key, Name: name}
+				keys = append(keys, key)
+			}
+			if !fulfillGroupHasOrder(aggMap[key].Orders, order.ID) {
+				aggMap[key].Orders = append(aggMap[key].Orders, order)
+			}
+			aggMap[key].TotalQty += item.Quantity
+		}
+	}
+
+	groups := make([]fulfillGroup, 0, len(keys))
+	for _, key := range keys {
+		groups = append(groups, *aggMap[key])
+	}
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Name == groups[j].Name {
+			return groups[i].Key < groups[j].Key
+		}
+		return groups[i].Name < groups[j].Name
+	})
+	return groups
+}
+
+func fulfillGroupHasOrder(orders []model.Order, orderID uint) bool {
+	for _, existing := range orders {
+		if existing.ID == orderID {
+			return true
+		}
+	}
+	return false
 }
 
 func buildParentOrderDetail(parent *model.Order) string {
@@ -896,7 +935,7 @@ func (h *Handler) loadAllProducts(ctx context.Context) ([]model.Product, error) 
 func orderItemSummary(o model.Order) string {
 	var parts []string
 	for _, item := range o.Items {
-		name := model.GetProductName(item.Title)
+		name := model.GetOrderItemDisplayName(item)
 		parts = append(parts, fmt.Sprintf("%s x%d", name, item.Quantity))
 	}
 	return strings.Join(parts, ", ")

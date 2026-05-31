@@ -240,7 +240,9 @@ type InventoryAlert struct {
 	ProductID      uint        `json:"product_id"`
 	ProductTitle   interface{} `json:"product_title"`
 	SKUID          uint        `json:"sku_id"`
+	SKUCode        string      `json:"sku_code"`
 	SKUName        interface{} `json:"sku_name"`
+	SKUSpecValues  interface{} `json:"sku_spec_values"`
 	AvailableStock int         `json:"available_stock"`
 	TotalStock     int         `json:"total_stock"`
 }
@@ -297,6 +299,23 @@ func GetProductSKUDisplayName(productTitle interface{}, sku SKU) string {
 		return productName
 	}
 	return productName + " / " + skuName
+}
+
+func GetInventoryAlertSKUName(alert InventoryAlert) string {
+	if name := localizedText(alert.SKUSpecValues); name != "" {
+		return name
+	}
+	if name := localizedText(alert.SKUName); name != "" {
+		return name
+	}
+	code := cleanString(alert.SKUCode)
+	if code == "" {
+		return "默认规格"
+	}
+	if code == "DEFAULT" {
+		return "默认规格"
+	}
+	return code
 }
 
 func GetOrderItemDisplayName(item OrderItem) string {

@@ -279,9 +279,9 @@ func (h *Handler) OnStock(c tele.Context) error {
 
 		if len(p.SKUs) > 0 {
 			for _, sku := range p.SKUs {
-				skuLabel := sku.SKUCode
-				if skuLabel == "DEFAULT" {
-					skuLabel = "默认规格"
+				skuLabel := model.GetProductSKUName(sku)
+				if skuLabel == "" {
+					skuLabel = fmt.Sprintf("SKU %d", sku.ID)
 				}
 				sb.WriteString(fmt.Sprintf("      SKU: %s\n", skuLabel))
 			}
@@ -1056,10 +1056,7 @@ func (s *StockAlertChecker) Run(ctx context.Context) {
 
 func formatAlertLine(a model.InventoryAlert) string {
 	pName := model.GetProductName(a.ProductTitle)
-	sName := model.GetProductName(a.SKUName)
-	if sName == "未知商品" {
-		sName = "默认规格"
-	}
+	sName := model.GetInventoryAlertSKUName(a)
 	return fmt.Sprintf("%s - %s: 可用 %d / 总计 %d", pName, sName, a.AvailableStock, a.TotalStock)
 }
 

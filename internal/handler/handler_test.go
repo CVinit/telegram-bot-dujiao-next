@@ -309,6 +309,25 @@ func TestSeedPaidOrderIDs(t *testing.T) {
 	}
 }
 
+func TestFormatAlertLineUsesSKUSpecValues(t *testing.T) {
+	got := formatAlertLine(model.InventoryAlert{
+		ProductTitle:   map[string]interface{}{"zh-CN": "ChatGPT Plus"},
+		SKUCode:        "PLUS-HK",
+		SKUSpecValues:  map[string]interface{}{"zh-CN": "香港区"},
+		AvailableStock: 1,
+		TotalStock:     10,
+	})
+
+	for _, part := range []string{"ChatGPT Plus", "香港区", "可用 1 / 总计 10"} {
+		if !strings.Contains(got, part) {
+			t.Errorf("formatAlertLine() = %q, want %q", got, part)
+		}
+	}
+	if strings.Contains(got, "PLUS-HK") {
+		t.Errorf("formatAlertLine() = %q, should prefer SKU spec values over sku_code", got)
+	}
+}
+
 func TestFormatPaidOrderAlertLine(t *testing.T) {
 	got := formatPaidOrderAlertLine(model.Order{
 		OrderNo:     "DJ-PAID-001",

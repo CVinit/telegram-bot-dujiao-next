@@ -115,6 +115,75 @@ func TestGetProductSKUDisplayName(t *testing.T) {
 	}
 }
 
+func TestGetInventoryAlertSKUName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input InventoryAlert
+		want  string
+	}{
+		{
+			name: "sku spec values first",
+			input: InventoryAlert{
+				SKUCode:       "HK",
+				SKUName:       "raw-code-name",
+				SKUSpecValues: map[string]interface{}{"zh-CN": "香港区"},
+			},
+			want: "香港区",
+		},
+		{
+			name:  "legacy sku name fallback",
+			input: InventoryAlert{SKUCode: "HK", SKUName: map[string]interface{}{"zh-CN": "香港区旧字段"}},
+			want:  "香港区旧字段",
+		},
+		{
+			name:  "sku code fallback",
+			input: InventoryAlert{SKUCode: "AUTO-HK"},
+			want:  "AUTO-HK",
+		},
+		{
+			name:  "default fallback",
+			input: InventoryAlert{SKUCode: "DEFAULT"},
+			want:  "默认规格",
+		},
+		{
+			name:  "empty fallback",
+			input: InventoryAlert{},
+			want:  "默认规格",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := GetInventoryAlertSKUName(tt.input)
+			if got != tt.want {
+				t.Errorf("GetInventoryAlertSKUName() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInventoryAlertUnmarshalSKUSpecValues(t *testing.T) {
+	raw := `{
+		"product_id": 1,
+		"product_title": {"zh-CN": "ChatGPT Plus"},
+		"sku_id": 2,
+		"sku_code": "PLUS-HK",
+		"sku_spec_values": {"zh-CN": "香港区"},
+		"available_stock": 1
+	}`
+
+	var alert InventoryAlert
+	if err := json.Unmarshal([]byte(raw), &alert); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got, want := GetInventoryAlertSKUName(alert), "香港区"; got != want {
+		t.Errorf("GetInventoryAlertSKUName() = %q, want %q", got, want)
+	}
+	if alert.SKUCode != "PLUS-HK" || alert.AvailableStock != 1 {
+		t.Errorf("InventoryAlert = %+v, want sku_code PLUS-HK and available_stock 1", alert)
+	}
+}
+
 func TestResponseUnmarshal(t *testing.T) {
 	raw := `{"status_code":0,"msg":"success","data":{"id":1,"title":"test"}}`
 	var resp Response

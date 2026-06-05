@@ -155,7 +155,7 @@ type Product struct {
 	AutoStockTotal     int         `json:"auto_stock_total"`
 	AutoStockLocked    int         `json:"auto_stock_locked"`
 	AutoStockSold      int         `json:"auto_stock_sold"`
-	IsActive           bool        `json:"is_active"`
+	IsActive           *bool       `json:"is_active"`
 	SKUs               []SKU       `json:"skus,omitempty"`
 	CreatedAt          string      `json:"created_at"`
 	UpdatedAt          string      `json:"updated_at"`
@@ -176,7 +176,7 @@ type SKU struct {
 	AutoStockLocked    int         `json:"auto_stock_locked"`
 	AutoStockSold      int         `json:"auto_stock_sold"`
 	UpstreamStock      int         `json:"upstream_stock"`
-	IsActive           bool        `json:"is_active"`
+	IsActive           *bool       `json:"is_active"`
 	CreatedAt          string      `json:"created_at"`
 	UpdatedAt          string      `json:"updated_at"`
 }

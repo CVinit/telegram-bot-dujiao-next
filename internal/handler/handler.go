@@ -264,18 +264,24 @@ func (h *Handler) OnStock(c tele.Context) error {
 		return c.Reply("没有自动发货的商品")
 	}
 
+	return c.Reply(formatStockOverview(products, h.cfg.StockAlert.Threshold))
+}
+
+func formatStockOverview(products []model.Product, threshold int) string {
 	var sb strings.Builder
 	sb.WriteString("库存概况：\n\n")
 	for _, p := range products {
 		name := model.GetProductName(p.Title)
-		avail := p.AutoStockAvailable
-		status := "✅"
-		lowMsg := ""
-		if avail <= h.cfg.StockAlert.Threshold {
-			status = "⚠️"
-			lowMsg = "(低库存!)"
+		if isInactive(p.IsActive) {
+			name += "（已下架）"
 		}
-		sb.WriteString(fmt.Sprintf("📦 %s\n   %s 库存：%d %s\n", name, status, avail, lowMsg))
+		avail := p.AutoStockAvailable
+		status, lowMsg := stockStatus(avail, threshold)
+		stockLabel := "库存"
+		if len(p.SKUs) > 0 {
+			stockLabel = "总库存"
+		}
+		sb.WriteString(fmt.Sprintf("📦 %s\n   %s %s：%d %s\n", name, status, stockLabel, avail, lowMsg))
 
 		if len(p.SKUs) > 0 {
 			for _, sku := range p.SKUs {
@@ -283,12 +289,27 @@ func (h *Handler) OnStock(c tele.Context) error {
 				if skuLabel == "" {
 					skuLabel = fmt.Sprintf("SKU %d", sku.ID)
 				}
-				sb.WriteString(fmt.Sprintf("      SKU: %s\n", skuLabel))
+				if isInactive(sku.IsActive) {
+					skuLabel += "（已下架）"
+				}
+				skuStatus, skuLowMsg := stockStatus(sku.AutoStockAvailable, threshold)
+				sb.WriteString(fmt.Sprintf("      %s SKU: %s 库存：%d %s\n", skuStatus, skuLabel, sku.AutoStockAvailable, skuLowMsg))
 			}
 		}
 		sb.WriteString("\n")
 	}
-	return c.Reply(sb.String())
+	return sb.String()
+}
+
+func stockStatus(available, threshold int) (string, string) {
+	if available <= threshold {
+		return "⚠️", "(低库存!)"
+	}
+	return "✅", ""
+}
+
+func isInactive(active *bool) bool {
+	return active != nil && !*active
 }
 
 // /cancel

@@ -189,6 +189,74 @@ func TestBuildFulfillGroupsSeparatesSKUs(t *testing.T) {
 	}
 }
 
+func TestFormatStockOverviewShowsSKULevelStockAndOfflineMarker(t *testing.T) {
+	active := true
+	inactive := false
+	products := []model.Product{
+		{
+			Title:              map[string]interface{}{"zh-CN": "土耳其区Apple ID/账号"},
+			AutoStockAvailable: 37,
+			IsActive:           &active,
+			SKUs: []model.SKU{
+				{
+					ID:                 1,
+					SKUCode:            "TURKEY-2FA",
+					SpecValues:         map[string]interface{}{"zh-CN": "双重认证登录"},
+					AutoStockAvailable: 20,
+					IsActive:           &active,
+				},
+				{
+					ID:                 2,
+					SKUCode:            "TURKEY-SECURITY",
+					SpecValues:         map[string]interface{}{"zh-CN": "密保问题登录"},
+					AutoStockAvailable: 6,
+					IsActive:           &active,
+				},
+			},
+		},
+		{
+			Title:              map[string]interface{}{"zh-CN": "土耳其Apple ID 带密保"},
+			AutoStockAvailable: 6,
+			IsActive:           &inactive,
+			SKUs: []model.SKU{{
+				ID:                 3,
+				SKUCode:            "TURKEY-QUESTION",
+				SpecValues:         map[string]interface{}{"zh-CN": "密保账号"},
+				AutoStockAvailable: 6,
+				IsActive:           &active,
+			}},
+		},
+	}
+
+	got := formatStockOverview(products, 10)
+	for _, part := range []string{
+		"📦 土耳其区Apple ID/账号",
+		"✅ 总库存：37",
+		"✅ SKU: 双重认证登录 库存：20",
+		"⚠️ SKU: 密保问题登录 库存：6 (低库存!)",
+		"📦 土耳其Apple ID 带密保（已下架）",
+		"⚠️ SKU: 密保账号 库存：6 (低库存!)",
+	} {
+		if !strings.Contains(got, part) {
+			t.Errorf("formatStockOverview() = %q, want substring %q", got, part)
+		}
+	}
+}
+
+func TestFormatStockOverviewDoesNotMarkMissingActiveFlagOffline(t *testing.T) {
+	got := formatStockOverview([]model.Product{{
+		Title:              map[string]interface{}{"zh-CN": "未返回状态商品"},
+		AutoStockAvailable: 1,
+	}}, 10)
+
+	if strings.Contains(got, "已下架") {
+		t.Errorf("formatStockOverview() = %q, should not mark missing is_active as offline", got)
+	}
+	if !strings.Contains(got, "⚠️ 库存：1 (低库存!)") {
+		t.Errorf("formatStockOverview() = %q, should keep product stock fallback for products without SKUs", got)
+	}
+}
+
 func TestLeafOrderResolution(t *testing.T) {
 	orders := []model.Order{
 		{

@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -205,6 +206,94 @@ type Product struct {
 	SKUs                 []SKU              `json:"skus,omitempty"`
 	CreatedAt            string             `json:"created_at"`
 	UpdatedAt            string             `json:"updated_at"`
+}
+
+// UnmarshalJSON accepts the payment_channel_ids formats returned by different
+// dujiao-next API versions while keeping the field type used by callers.
+func (p *Product) UnmarshalJSON(data []byte) error {
+	type productAlias Product
+	aux := struct {
+		PaymentChannelIDs json.RawMessage `json:"payment_channel_ids"`
+		*productAlias
+	}{productAlias: (*productAlias)(p)}
+
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if len(aux.PaymentChannelIDs) == 0 {
+		return nil
+	}
+
+	ids, err := parsePaymentChannelIDs(aux.PaymentChannelIDs)
+	if err != nil {
+		return err
+	}
+	p.PaymentChannelIDs = ids
+	return nil
+}
+
+func parsePaymentChannelIDs(raw json.RawMessage) ([]uint, error) {
+	value := strings.TrimSpace(string(raw))
+	if value == "" || value == "null" {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(value, "[") {
+		return parsePaymentChannelIDArray(raw)
+	}
+
+	isString := false
+	if strings.HasPrefix(value, "\"") {
+		isString = true
+		var encoded string
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return nil, fmt.Errorf("payment_channel_ids: invalid JSON string: %w", err)
+		}
+		encoded = strings.TrimSpace(encoded)
+		if encoded == "" {
+			return nil, nil
+		}
+		if strings.HasPrefix(encoded, "[") {
+			return parsePaymentChannelIDArray([]byte(encoded))
+		}
+		value = encoded
+	}
+	if !isString {
+		return nil, fmt.Errorf("payment_channel_ids: expected an array or string, got %s", value)
+	}
+
+	parts := strings.Split(value, ",")
+	ids := make([]uint, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("payment_channel_ids: empty ID in comma-separated value")
+		}
+		id, err := strconv.ParseUint(part, 10, strconv.IntSize)
+		if err != nil {
+			return nil, fmt.Errorf("payment_channel_ids: invalid ID %q: %w", part, err)
+		}
+		ids = append(ids, uint(id))
+	}
+	return ids, nil
+}
+
+func parsePaymentChannelIDArray(raw []byte) ([]uint, error) {
+	var values []json.RawMessage
+	if err := json.Unmarshal(raw, &values); err != nil {
+		return nil, fmt.Errorf("payment_channel_ids: invalid JSON array: %w", err)
+	}
+
+	ids := make([]uint, len(values))
+	for i, value := range values {
+		if strings.TrimSpace(string(value)) == "null" {
+			return nil, fmt.Errorf("payment_channel_ids: array item %d is null", i)
+		}
+		if err := json.Unmarshal(value, &ids[i]); err != nil {
+			return nil, fmt.Errorf("payment_channel_ids: invalid array item %d: %w", i, err)
+		}
+	}
+	return ids, nil
 }
 
 type SKU struct {

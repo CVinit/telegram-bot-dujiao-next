@@ -199,6 +199,56 @@ func TestResponseUnmarshal(t *testing.T) {
 	}
 }
 
+func TestProductPaymentChannelIDsUnmarshal(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []uint
+	}{
+		{name: "numeric array", raw: `[1,2]`, want: []uint{1, 2}},
+		{name: "JSON array string", raw: `"[1,2]"`, want: []uint{1, 2}},
+		{name: "comma-separated string", raw: `"1, 2,3"`, want: []uint{1, 2, 3}},
+		{name: "empty string", raw: `""`, want: nil},
+		{name: "null", raw: `null`, want: nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var product Product
+			raw := []byte(`{"id":7,"payment_channel_ids":` + tt.raw + `}`)
+			if err := json.Unmarshal(raw, &product); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if product.ID != 7 {
+				t.Fatalf("ID = %d, want 7", product.ID)
+			}
+			if len(product.PaymentChannelIDs) != len(tt.want) {
+				t.Fatalf("PaymentChannelIDs = %v, want %v", product.PaymentChannelIDs, tt.want)
+			}
+			for i := range tt.want {
+				if product.PaymentChannelIDs[i] != tt.want[i] {
+					t.Errorf("PaymentChannelIDs[%d] = %d, want %d", i, product.PaymentChannelIDs[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestProductPaymentChannelIDsUnmarshalRejectsInvalidInput(t *testing.T) {
+	for _, raw := range []string{`[1,"bad"]`, `[1,null]`, `"[1,null]"`, `"1,,2"`, `"null"`, `"not-a-number"`, `true`, `1`} {
+		t.Run(raw, func(t *testing.T) {
+			var product Product
+			err := json.Unmarshal([]byte(`{"payment_channel_ids":`+raw+`}`), &product)
+			if err == nil {
+				t.Fatalf("expected invalid input error for %s", raw)
+			}
+			if !strings.Contains(err.Error(), "payment_channel_ids") {
+				t.Fatalf("error = %q, want payment_channel_ids context", err)
+			}
+		})
+	}
+}
+
 func TestPageResponseUnmarshal(t *testing.T) {
 	raw := `{"status_code":0,"msg":"success","data":[],"pagination":{"page":1,"page_size":20,"total":100,"total_page":5}}`
 	var resp PageResponse

@@ -84,18 +84,9 @@ func (h *Handler) OnOrders(c tele.Context) error {
 		return c.Reply("没有待处理的订单")
 	}
 
-	// Resolve leaf orders for display
-	var leafOrders []model.Order
-	for _, o := range orders {
-		if len(o.Children) > 0 {
-			for _, ch := range o.Children {
-				if ch.Status == "fulfilling" || ch.Status == "paid" {
-					leafOrders = append(leafOrders, ch)
-				}
-			}
-		} else {
-			leafOrders = append(leafOrders, o)
-		}
+	leafOrders := resolveLeafOrders(orders)
+	if len(leafOrders) == 0 {
+		return c.Reply("没有待处理的订单")
 	}
 
 	var sb strings.Builder
@@ -157,19 +148,10 @@ func (h *Handler) OnFulfill(c tele.Context) error {
 		return c.Reply("没有待发货的订单")
 	}
 
-	// Resolve leaf orders: parent orders with children must use children for fulfillment
-	// Only include children that still need fulfillment (fulfilling or paid status)
-	var leafOrders []model.Order
-	for _, o := range orders {
-		if len(o.Children) > 0 {
-			for _, ch := range o.Children {
-				if ch.Status == "fulfilling" || ch.Status == "paid" {
-					leafOrders = append(leafOrders, ch)
-				}
-			}
-		} else {
-			leafOrders = append(leafOrders, o)
-		}
+	// Resolve leaf orders: parent orders with children must use children for fulfillment.
+	leafOrders := resolveLeafOrders(orders)
+	if len(leafOrders) == 0 {
+		return c.Reply("没有待发货的订单")
 	}
 
 	groups := buildFulfillGroups(leafOrders)
@@ -222,7 +204,7 @@ func (h *Handler) OnParentFulfill(c tele.Context) error {
 	for _, o := range parentOrders {
 		needFulfill := 0
 		for _, ch := range o.Children {
-			if ch.Status == "fulfilling" || ch.Status == "paid" {
+			if model.IsFulfillableOrderStatus(ch.Status) {
 				qty := 0
 				for _, item := range ch.Items {
 					qty += item.Quantity
@@ -301,8 +283,8 @@ func formatStockOverview(products []model.Product, threshold int) string {
 	return sb.String()
 }
 
-func stockStatus(available, threshold int) (string, string) {
-	if available <= threshold {
+func stockStatus(available int64, threshold int) (string, string) {
+	if available <= int64(threshold) {
 		return "⚠️", "(低库存!)"
 	}
 	return "✅", ""
@@ -525,7 +507,7 @@ func (h *Handler) handleParentFulfillCallback(c tele.Context, orderIDStr string)
 	// Collect fulfillable children (fulfilling or paid)
 	var children []model.Order
 	for _, ch := range selected.Children {
-		if ch.Status == "fulfilling" || ch.Status == "paid" {
+		if model.IsFulfillableOrderStatus(ch.Status) {
 			children = append(children, ch)
 		}
 	}
@@ -684,11 +666,12 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 	// partially fulfill a single order (that would leave the customer
 	// short). Orders that can't be fully covered are skipped.
 	type fulfillResult struct {
-		OrderID  uint
-		OrderNo  string
-		ItemDesc string
-		Qty      int
-		Err      error
+		OrderID            uint
+		OrderNo            string
+		ItemDesc           string
+		Qty                int
+		FulfillmentCreated bool
+		Err                error
 	}
 	var results []fulfillResult
 	secretIdx := 0
@@ -712,11 +695,11 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			OrderID: o.ID,
 			Payload: payload,
 		})
-		results = append(results, fulfillResult{OrderID: o.ID, OrderNo: o.OrderNo, ItemDesc: orderItemSummary(o), Qty: qty, Err: err})
+		results = append(results, fulfillResult{OrderID: o.ID, OrderNo: o.OrderNo, ItemDesc: orderItemSummary(o), Qty: qty, FulfillmentCreated: err == nil, Err: err})
 
 		if err == nil {
-			if compErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); compErr != nil {
-				_ = compErr
+			if statusErr := h.api.UpdateOrderStatus(ctx, o.ID, "completed"); statusErr != nil {
+				results[len(results)-1].Err = fmt.Errorf("发货成功但更新订单状态失败：%w", statusErr)
 			}
 		}
 	}
@@ -739,6 +722,9 @@ func (h *Handler) processFulfillSecrets(c tele.Context, secrets []string, s *sta
 			}
 			successDetails = append(successDetails, fmt.Sprintf("  %s | %s → %s（%d个卡密）", r.OrderNo, r.ItemDesc, orderStatus, r.Qty))
 		} else {
+			if r.FulfillmentCreated {
+				usedSecrets += r.Qty
+			}
 			errMsg := r.Err.Error()
 			if strings.Contains(errMsg, "已存在") || strings.Contains(errMsg, "already exist") {
 				skippedCount++
@@ -796,6 +782,7 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 
 	// Fulfill each child order in order
 	type childResult struct {
+		OrderID  uint
 		OrderNo  string
 		ItemDesc string
 		Qty      int
@@ -822,11 +809,12 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 			OrderID: ch.ID,
 			Payload: payload,
 		})
-		results = append(results, childResult{OrderNo: ch.OrderNo, ItemDesc: orderItemSummary(ch), Qty: qty, Err: err})
+		results = append(results, childResult{OrderID: ch.ID, OrderNo: ch.OrderNo, ItemDesc: orderItemSummary(ch), Qty: qty, Err: err})
 
 		if err == nil {
-			if compErr := h.api.UpdateOrderStatus(ctx, ch.ID, "completed"); compErr != nil {
-				_ = compErr
+			if statusErr := h.api.UpdateOrderStatus(ctx, ch.ID, "completed"); statusErr != nil {
+				results[len(results)-1].Err = fmt.Errorf("发货成功但更新订单状态失败：%w", statusErr)
+				allSuccess = false
 			}
 		} else {
 			allSuccess = false
@@ -843,11 +831,11 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 		sb.WriteString("⚠️ 部分子订单发货失败\n\n")
 	}
 
-	for i, r := range results {
+	for _, r := range results {
 		if r.Err == nil {
 			// Query latest status
 			childStatus := "?"
-			if o, err := h.api.GetOrder(ctx, children[i].ID); err == nil {
+			if o, err := h.api.GetOrder(ctx, r.OrderID); err == nil {
 				childStatus = o.Status
 			}
 			sb.WriteString(fmt.Sprintf("✅ %s | %s | %d个卡密 → %s\n", r.OrderNo, r.ItemDesc, r.Qty, childStatus))
@@ -875,11 +863,32 @@ func (h *Handler) processParentFulfillSecrets(c tele.Context, secrets []string, 
 func countFulfillableChildren(children []model.Order) int {
 	n := 0
 	for _, ch := range children {
-		if ch.Status == "fulfilling" || ch.Status == "paid" {
+		if model.IsFulfillableOrderStatus(ch.Status) {
 			n++
 		}
 	}
 	return n
+}
+
+// resolveLeafOrders keeps partially_delivered as a parent-discovery status.
+// A top-level order with that status must not be sent to manual fulfillment
+// when its child records are absent from the response.
+func resolveLeafOrders(orders []model.Order) []model.Order {
+	var leafOrders []model.Order
+	for _, order := range orders {
+		if len(order.Children) > 0 {
+			for _, child := range order.Children {
+				if model.IsFulfillableOrderStatus(child.Status) {
+					leafOrders = append(leafOrders, child)
+				}
+			}
+			continue
+		}
+		if model.IsFulfillableOrderStatus(order.Status) {
+			leafOrders = append(leafOrders, order)
+		}
+	}
+	return leafOrders
 }
 
 func buildFulfillGroups(leafOrders []model.Order) []fulfillGroup {

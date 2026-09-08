@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -238,6 +239,50 @@ func TestOrderUnmarshal(t *testing.T) {
 	name := GetProductName(order.Items[0].Title)
 	if name != "土耳其Apple ID" {
 		t.Errorf("Item title name = %q, want %q", name, "土耳其Apple ID")
+	}
+}
+
+func TestUpstreamExtendedFieldsAndFulfillableStatuses(t *testing.T) {
+	raw := `{"parent_id":3,"status":"partially_refunded","wholesale_discount_amount":"3.00","refund_records":[{"id":9,"order_id":3,"type":"wallet","amount":"1.00","currency":"USD","remark":"manual"}],"items":[{"original_unit_price":"12.00","original_total_price":"24.00","wholesale_discount_amount":"2.00","promotion_id":5}],"fulfillment":{"id":8,"status":"delivered"}}`
+	var order Order
+	if err := json.Unmarshal([]byte(raw), &order); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if order.ParentID == nil || *order.ParentID != 3 || order.WholesaleDiscountAmount != "3.00" || len(order.RefundRecords) != 1 || order.RefundRecords[0].ID != 9 || order.RefundRecords[0].Currency != "USD" || order.Fulfillment == nil {
+		t.Fatalf("extended order = %+v", order)
+	}
+	item := order.Items[0]
+	if item.OriginalUnitPrice != "12.00" || item.OriginalTotalPrice != "24.00" || item.WholesaleDiscountAmount != "2.00" || item.PromotionID == nil || *item.PromotionID != 5 {
+		t.Fatalf("extended item = %+v", item)
+	}
+	for _, status := range []string{"paid", "fulfilling"} {
+		if !IsFulfillableOrderStatus(status) {
+			t.Errorf("IsFulfillableOrderStatus(%q) = false", status)
+		}
+	}
+	if IsFulfillableOrderStatus("delivered") {
+		t.Error("delivered should not be fulfillable")
+	}
+	if IsFulfillableOrderStatus("partially_delivered") {
+		t.Error("partially_delivered is a parent/list status, not directly fulfillable")
+	}
+}
+
+func TestCardSecretBatchDeduplicateOmitEmpty(t *testing.T) {
+	data, err := json.Marshal(CreateCardSecretBatchRequest{ProductID: 1, SKUID: 2, Secrets: []string{"A"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(data) != `{"product_id":1,"sku_id":2,"secrets":["A"]}` {
+		t.Fatalf("request JSON = %s", data)
+	}
+	deduplicate := false
+	data, err = json.Marshal(CreateCardSecretBatchRequest{ProductID: 1, SKUID: 2, Secrets: []string{"A"}, Deduplicate: &deduplicate})
+	if err != nil {
+		t.Fatalf("marshal with deduplicate: %v", err)
+	}
+	if !strings.Contains(string(data), `"deduplicate":false`) {
+		t.Fatalf("request JSON = %s, want explicit false", data)
 	}
 }
 

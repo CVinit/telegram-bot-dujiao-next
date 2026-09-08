@@ -282,18 +282,7 @@ func TestLeafOrderResolution(t *testing.T) {
 		},
 	}
 
-	var leafOrders []model.Order
-	for _, o := range orders {
-		if len(o.Children) > 0 {
-			for _, ch := range o.Children {
-				if ch.Status == "fulfilling" || ch.Status == "paid" {
-					leafOrders = append(leafOrders, ch)
-				}
-			}
-		} else {
-			leafOrders = append(leafOrders, o)
-		}
-	}
+	leafOrders := resolveLeafOrders(orders)
 
 	// Should get: 37, 38, 41, 50 (not 36 or 40 which are delivered)
 	wantIDs := []uint{37, 38, 41, 50}
@@ -319,21 +308,26 @@ func TestLeafOrderResolutionAllDelivered(t *testing.T) {
 		},
 	}
 
-	var leafOrders []model.Order
-	for _, o := range orders {
-		if len(o.Children) > 0 {
-			for _, ch := range o.Children {
-				if ch.Status == "fulfilling" || ch.Status == "paid" {
-					leafOrders = append(leafOrders, ch)
-				}
-			}
-		} else {
-			leafOrders = append(leafOrders, o)
-		}
-	}
+	leafOrders := resolveLeafOrders(orders)
 
 	if len(leafOrders) != 0 {
 		t.Errorf("expected 0 leaf orders when all children delivered, got %d", len(leafOrders))
+	}
+}
+
+func TestLeafOrderResolutionDoesNotTreatPartiallyDeliveredParentAsLeaf(t *testing.T) {
+	orders := []model.Order{
+		{ID: 1, Status: "partially_delivered"},
+		{ID: 2, Status: "paid"},
+		{ID: 3, Status: "partially_delivered", Children: []model.Order{
+			{ID: 4, Status: "delivered"},
+			{ID: 5, Status: "fulfilling"},
+		}},
+	}
+
+	leafOrders := resolveLeafOrders(orders)
+	if len(leafOrders) != 2 || leafOrders[0].ID != 2 || leafOrders[1].ID != 5 {
+		t.Fatalf("resolveLeafOrders() = %+v, want leaf IDs [2 5]", leafOrders)
 	}
 }
 

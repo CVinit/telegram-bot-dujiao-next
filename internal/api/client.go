@@ -26,6 +26,21 @@ type Client struct {
 	password string
 }
 
+// TOTPChallengeError marks a successful password check that requires a
+// separate interactive 2FA verification step. The bot deliberately does not
+// collect or generate TOTP codes, so callers can present this boundary clearly.
+type TOTPChallengeError struct {
+	ChallengeToken string
+	ExpiresAt      *string
+}
+
+func (e *TOTPChallengeError) Error() string {
+	if e.ExpiresAt != nil && *e.ExpiresAt != "" {
+		return fmt.Sprintf("账号需要两步验证，请完成 2FA challenge（有效期至 %s）后重试", *e.ExpiresAt)
+	}
+	return "账号需要两步验证，请完成 2FA challenge 后重试"
+}
+
 func NewClient(cfg config.DujiaoConfig) *Client {
 	return &Client{
 		baseURL: cfg.BaseURL,
@@ -106,7 +121,16 @@ func (c *Client) login(ctx context.Context) error {
 	}
 
 	if loginData.RequiresTOTP {
-		return fmt.Errorf("账号启用了两步验证，Bot 暂不支持")
+		// A challenge is not an authenticated session. Clear any stale token so
+		// a refresh attempt cannot leave callers using the previous credential.
+		c.mu.Lock()
+		c.token = ""
+		c.expiresAt = time.Time{}
+		c.mu.Unlock()
+		return &TOTPChallengeError{
+			ChallengeToken: loginData.ChallengeToken,
+			ExpiresAt:      loginData.ChallengeExpiresAt,
+		}
 	}
 	if loginData.Token == "" {
 		return fmt.Errorf("login: 响应中没有 token")
@@ -279,17 +303,25 @@ func (c *Client) ListRecentOrders(ctx context.Context, pageSize, maxPages int) (
 }
 
 // ListFulfillingOrders fetches orders that need manual fulfillment.
-// It queries both "fulfilling" and "partially_delivered" statuses
-// because parent orders with some children delivered change to
-// partially_delivered while remaining children still need fulfillment.
+// It queries all statuses that can still receive manual fulfillment.
 func (c *Client) ListFulfillingOrders(ctx context.Context) ([]model.Order, error) {
 	var allOrders []model.Order
-	for _, status := range []string{"fulfilling", "partially_delivered"} {
-		orders, _, err := c.ListOrders(ctx, status, 1, 100)
-		if err != nil {
-			return nil, fmt.Errorf("list %s orders: %w", status, err)
+	for _, status := range []string{"paid", "fulfilling", "partially_delivered"} {
+		statusOrderCount := 0
+		for page := 1; ; page++ {
+			orders, pagination, err := c.ListOrders(ctx, status, page, 100)
+			if err != nil {
+				return nil, fmt.Errorf("list %s orders page %d: %w", status, page, err)
+			}
+			allOrders = append(allOrders, orders...)
+			statusOrderCount += len(orders)
+			if len(orders) == 0 ||
+				(pagination.Total > 0 && int64(statusOrderCount) >= pagination.Total) ||
+				(pagination.TotalPage > 0 && int64(page) >= pagination.TotalPage) ||
+				(pagination.TotalPage == 0 && len(orders) < 100) {
+				break
+			}
 		}
-		allOrders = append(allOrders, orders...)
 	}
 	return allOrders, nil
 }

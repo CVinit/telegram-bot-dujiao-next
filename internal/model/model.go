@@ -36,10 +36,12 @@ type LoginRequest struct {
 }
 
 type LoginResponseData struct {
-	RequiresTOTP bool       `json:"requires_totp"`
-	Token        string     `json:"token"`
-	ExpiresAt    *string    `json:"expires_at"`
-	User         *AdminUser `json:"user,omitempty"`
+	RequiresTOTP       bool       `json:"requires_totp"`
+	Token              string     `json:"token"`
+	ExpiresAt          *string    `json:"expires_at"`
+	ChallengeToken     string     `json:"challenge_token"`
+	ChallengeExpiresAt *string    `json:"challenge_expires_at"`
+	User               *AdminUser `json:"user,omitempty"`
 }
 
 type AdminUser struct {
@@ -50,28 +52,33 @@ type AdminUser struct {
 // Order
 
 type Order struct {
-	ID                      uint        `json:"id"`
-	OrderNo                 string      `json:"order_no"`
-	Status                  string      `json:"status"`
-	Currency                string      `json:"currency"`
-	OriginalAmount          string      `json:"original_amount"`
-	DiscountAmount          string      `json:"discount_amount"`
-	MemberDiscountAmount    string      `json:"member_discount_amount"`
-	PromotionDiscountAmount string      `json:"promotion_discount_amount"`
-	TotalAmount             string      `json:"total_amount"`
-	WalletPaidAmount        string      `json:"wallet_paid_amount"`
-	OnlinePaidAmount        string      `json:"online_paid_amount"`
-	RefundedAmount          string      `json:"refunded_amount"`
-	GuestEmail              string      `json:"guest_email"`
-	GuestLocale             string      `json:"guest_locale"`
-	ClientIP                string      `json:"client_ip"`
-	ExpiresAt               *string     `json:"expires_at"`
-	PaidAt                  *string     `json:"paid_at"`
-	CanceledAt              *string     `json:"canceled_at"`
-	CreatedAt               string      `json:"created_at"`
-	UpdatedAt               string      `json:"updated_at"`
-	Items                   []OrderItem `json:"items"`
-	Children                []Order     `json:"children"`
+	ID                       uint                 `json:"id"`
+	ParentID                 *uint                `json:"parent_id"`
+	OrderNo                  string               `json:"order_no"`
+	Status                   string               `json:"status"`
+	Currency                 string               `json:"currency"`
+	OriginalAmount           string               `json:"original_amount"`
+	DiscountAmount           string               `json:"discount_amount"`
+	MemberDiscountAmount     string               `json:"member_discount_amount"`
+	PromotionDiscountAmount  string               `json:"promotion_discount_amount"`
+	WholesaleDiscountAmount  string               `json:"wholesale_discount_amount"`
+	TotalAmount              string               `json:"total_amount"`
+	WalletPaidAmount         string               `json:"wallet_paid_amount"`
+	OnlinePaidAmount         string               `json:"online_paid_amount"`
+	RefundedAmount           string               `json:"refunded_amount"`
+	GuestEmail               string               `json:"guest_email"`
+	GuestLocale              string               `json:"guest_locale"`
+	ClientIP                 string               `json:"client_ip"`
+	ExpiresAt                *string              `json:"expires_at"`
+	PaidAt                   *string              `json:"paid_at"`
+	CanceledAt               *string              `json:"canceled_at"`
+	CreatedAt                string               `json:"created_at"`
+	UpdatedAt                string               `json:"updated_at"`
+	Items                    []OrderItem          `json:"items"`
+	Fulfillment              *FulfillmentResponse `json:"fulfillment"`
+	RefundRecords            []RefundRecord       `json:"refund_records"`
+	AllowedPaymentChannelIDs []uint               `json:"allowed_payment_channel_ids"`
+	Children                 []Order              `json:"children"`
 }
 
 type OrderItem struct {
@@ -83,12 +90,17 @@ type OrderItem struct {
 	SKUSnapshot              interface{} `json:"sku_snapshot"`
 	Tags                     interface{} `json:"tags"`
 	UnitPrice                string      `json:"unit_price"`
+	OriginalUnitPrice        string      `json:"original_unit_price"`
 	CostPrice                string      `json:"cost_price"`
 	Quantity                 int         `json:"quantity"`
 	TotalPrice               string      `json:"total_price"`
+	OriginalTotalPrice       string      `json:"original_total_price"`
 	CouponDiscountAmount     string      `json:"coupon_discount_amount"`
 	MemberDiscountAmount     string      `json:"member_discount_amount"`
 	PromotionDiscountAmount  string      `json:"promotion_discount_amount"`
+	WholesaleDiscountAmount  string      `json:"wholesale_discount_amount"`
+	PromotionID              *uint       `json:"promotion_id"`
+	PromotionName            interface{} `json:"promotion_name"`
 	FulfillmentType          string      `json:"fulfillment_type"`
 	ManualFormSchemaSnapshot interface{} `json:"manual_form_schema_snapshot"`
 	ManualFormSubmission     interface{} `json:"manual_form_submission"`
@@ -118,14 +130,27 @@ type FulfillmentResponse struct {
 	CreatedAt        string      `json:"created_at"`
 }
 
+type RefundRecord struct {
+	ID        uint   `json:"id"`
+	OrderID   uint   `json:"order_id"`
+	UserID    uint   `json:"user_id"`
+	Type      string `json:"type"`
+	Amount    string `json:"amount"`
+	Currency  string `json:"currency"`
+	Remark    string `json:"remark"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
+}
+
 // Card secret batch
 
 type CreateCardSecretBatchRequest struct {
-	ProductID uint     `json:"product_id"`
-	SKUID     uint     `json:"sku_id"`
-	Secrets   []string `json:"secrets"`
-	BatchNo   string   `json:"batch_no,omitempty"`
-	Note      string   `json:"note,omitempty"`
+	ProductID   uint     `json:"product_id"`
+	SKUID       uint     `json:"sku_id"`
+	Secrets     []string `json:"secrets"`
+	BatchNo     string   `json:"batch_no,omitempty"`
+	Note        string   `json:"note,omitempty"`
+	Deduplicate *bool    `json:"deduplicate,omitempty"`
 }
 
 type CreateCardSecretBatchResponse struct {
@@ -137,51 +162,94 @@ type CreateCardSecretBatchResponse struct {
 // Product
 
 type Product struct {
-	ID                 uint        `json:"id"`
-	CategoryID         uint        `json:"category_id"`
-	Slug               string      `json:"slug"`
-	Title              interface{} `json:"title"`
-	Description        interface{} `json:"description"`
-	Content            interface{} `json:"content"`
-	Instructions       interface{} `json:"instructions"`
-	PriceAmount        string      `json:"price_amount"`
-	CostPriceAmount    string      `json:"cost_price_amount"`
-	FulfillmentType    string      `json:"fulfillment_type"`
-	ManualFormSchema   interface{} `json:"manual_form_schema"`
-	ManualStockTotal   int         `json:"manual_stock_total"`
-	ManualStockLocked  int         `json:"manual_stock_locked"`
-	ManualStockSold    int         `json:"manual_stock_sold"`
-	AutoStockAvailable int         `json:"auto_stock_available"`
-	AutoStockTotal     int         `json:"auto_stock_total"`
-	AutoStockLocked    int         `json:"auto_stock_locked"`
-	AutoStockSold      int         `json:"auto_stock_sold"`
-	IsActive           *bool       `json:"is_active"`
-	SKUs               []SKU       `json:"skus,omitempty"`
-	CreatedAt          string      `json:"created_at"`
-	UpdatedAt          string      `json:"updated_at"`
+	ID                   uint               `json:"id"`
+	CategoryID           uint               `json:"category_id"`
+	Slug                 string             `json:"slug"`
+	SEOMeta              interface{}        `json:"seo_meta"`
+	Title                interface{}        `json:"title"`
+	Description          interface{}        `json:"description"`
+	Content              interface{}        `json:"content"`
+	Instructions         interface{}        `json:"instructions"`
+	PriceAmount          string             `json:"price_amount"`
+	WholesalePrices      []WholesalePrice   `json:"wholesale_prices,omitempty"`
+	Images               []string           `json:"images"`
+	Tags                 []string           `json:"tags"`
+	PurchaseType         string             `json:"purchase_type"`
+	MinPurchaseQuantity  int                `json:"min_purchase_quantity"`
+	MaxPurchaseQuantity  int                `json:"max_purchase_quantity"`
+	CostPriceAmount      string             `json:"cost_price_amount"`
+	FulfillmentType      string             `json:"fulfillment_type"`
+	ManualFormSchema     interface{}        `json:"manual_form_schema"`
+	ManualStockAvailable int                `json:"manual_stock_available"`
+	ManualStockTotal     int                `json:"manual_stock_total"`
+	ManualStockLocked    int                `json:"manual_stock_locked"`
+	ManualStockSold      int                `json:"manual_stock_sold"`
+	AutoStockAvailable   int64              `json:"auto_stock_available"`
+	AutoStockTotal       int                `json:"auto_stock_total"`
+	AutoStockLocked      int                `json:"auto_stock_locked"`
+	AutoStockSold        int                `json:"auto_stock_sold"`
+	IsActive             *bool              `json:"is_active"`
+	StockStatus          string             `json:"stock_status"`
+	IsSoldOut            *bool              `json:"is_sold_out"`
+	StockDisplayMode     string             `json:"stock_display_mode"`
+	StockDisplay         interface{}        `json:"stock_display"`
+	StockRangeMin        *int               `json:"stock_range_min"`
+	StockRangeMax        *int               `json:"stock_range_max"`
+	StockQuantityHidden  *bool              `json:"stock_quantity_hidden"`
+	PaymentChannelIDs    []uint             `json:"payment_channel_ids"`
+	PromotionID          *uint              `json:"promotion_id,omitempty"`
+	PromotionName        string             `json:"promotion_name,omitempty"`
+	PromotionType        string             `json:"promotion_type,omitempty"`
+	PromotionPriceAmount *string            `json:"promotion_price_amount,omitempty"`
+	MemberPrices         []MemberLevelPrice `json:"member_prices,omitempty"`
+	SKUs                 []SKU              `json:"skus,omitempty"`
+	CreatedAt            string             `json:"created_at"`
+	UpdatedAt            string             `json:"updated_at"`
 }
 
 type SKU struct {
-	ID                 uint        `json:"id"`
-	ProductID          uint        `json:"product_id"`
-	SKUCode            string      `json:"sku_code"`
-	SpecValues         interface{} `json:"spec_values"`
-	PriceAmount        string      `json:"price_amount"`
-	CostPriceAmount    string      `json:"cost_price_amount"`
-	ManualStockTotal   int         `json:"manual_stock_total"`
-	ManualStockLocked  int         `json:"manual_stock_locked"`
-	ManualStockSold    int         `json:"manual_stock_sold"`
-	AutoStockAvailable int         `json:"auto_stock_available"`
-	AutoStockTotal     int         `json:"auto_stock_total"`
-	AutoStockLocked    int         `json:"auto_stock_locked"`
-	AutoStockSold      int         `json:"auto_stock_sold"`
-	UpstreamStock      int         `json:"upstream_stock"`
-	IsActive           *bool       `json:"is_active"`
-	CreatedAt          string      `json:"created_at"`
-	UpdatedAt          string      `json:"updated_at"`
+	ID                   uint        `json:"id"`
+	ProductID            uint        `json:"product_id"`
+	SKUCode              string      `json:"sku_code"`
+	SpecValues           interface{} `json:"spec_values"`
+	PriceAmount          string      `json:"price_amount"`
+	CostPriceAmount      string      `json:"cost_price_amount"`
+	ManualStockTotal     int         `json:"manual_stock_total"`
+	ManualStockLocked    int         `json:"manual_stock_locked"`
+	ManualStockSold      int         `json:"manual_stock_sold"`
+	AutoStockAvailable   int64       `json:"auto_stock_available"`
+	AutoStockTotal       int         `json:"auto_stock_total"`
+	AutoStockLocked      int         `json:"auto_stock_locked"`
+	AutoStockSold        int         `json:"auto_stock_sold"`
+	UpstreamStock        int         `json:"upstream_stock"`
+	IsActive             *bool       `json:"is_active"`
+	StockStatus          string      `json:"stock_status"`
+	IsSoldOut            *bool       `json:"is_sold_out"`
+	StockDisplayMode     string      `json:"stock_display_mode"`
+	StockDisplay         interface{} `json:"stock_display"`
+	StockRangeMin        *int        `json:"stock_range_min"`
+	StockRangeMax        *int        `json:"stock_range_max"`
+	StockQuantityHidden  *bool       `json:"stock_quantity_hidden"`
+	PromotionPriceAmount *string     `json:"promotion_price_amount,omitempty"`
+	MemberPriceAmount    *string     `json:"member_price_amount,omitempty"`
+	CreatedAt            string      `json:"created_at"`
+	UpdatedAt            string      `json:"updated_at"`
 }
 
-// Dashboard overview — matches actual API response structure
+type WholesalePrice struct {
+	SKUID       uint   `json:"sku_id,omitempty"`
+	SKUCode     string `json:"sku_code,omitempty"`
+	MinQuantity int    `json:"min_quantity"`
+	UnitPrice   string `json:"unit_price"`
+}
+
+type MemberLevelPrice struct {
+	MemberLevelID uint   `json:"member_level_id"`
+	SKUID         uint   `json:"sku_id"`
+	PriceAmount   string `json:"price_amount"`
+}
+
+// Dashboard overview — matches actual API response structure.
 
 type DashboardOverview struct {
 	Range    string           `json:"range"`
@@ -237,14 +305,29 @@ type DashboardAlert struct {
 // Inventory alert from dashboard/inventory-alerts endpoint
 
 type InventoryAlert struct {
-	ProductID      uint        `json:"product_id"`
-	ProductTitle   interface{} `json:"product_title"`
-	SKUID          uint        `json:"sku_id"`
-	SKUCode        string      `json:"sku_code"`
-	SKUName        interface{} `json:"sku_name"`
-	SKUSpecValues  interface{} `json:"sku_spec_values"`
-	AvailableStock int         `json:"available_stock"`
-	TotalStock     int         `json:"total_stock"`
+	ProductID           uint        `json:"product_id"`
+	ProductTitle        interface{} `json:"product_title"`
+	SKUID               uint        `json:"sku_id"`
+	SKUCode             string      `json:"sku_code"`
+	SKUName             interface{} `json:"sku_name"`
+	SKUSpecValues       interface{} `json:"sku_spec_values"`
+	AvailableStock      int         `json:"available_stock"`
+	TotalStock          int         `json:"total_stock"`
+	StockStatus         string      `json:"stock_status"`
+	IsSoldOut           *bool       `json:"is_sold_out"`
+	StockDisplay        interface{} `json:"stock_display"`
+	StockRangeMin       *int        `json:"stock_range_min"`
+	StockRangeMax       *int        `json:"stock_range_max"`
+	StockQuantityHidden *bool       `json:"stock_quantity_hidden"`
+}
+
+func IsFulfillableOrderStatus(status string) bool {
+	switch status {
+	case "paid", "fulfilling":
+		return true
+	default:
+		return false
+	}
 }
 
 // Dashboard trends
